@@ -269,6 +269,18 @@ class TemplateManager:
         self._save_meta()
         return tid
 
+    def import_hwp_template(self, src_path: str, doc_type: str = "자유형식",
+                            description: str = "") -> str:
+        """HWP 파일을 templates 디렉토리로 복사하고 메타 등록. template_id 반환."""
+        import shutil
+        src = Path(src_path)
+        tid = src.stem
+        dest = TEMPLATES_DIR / src.name
+        shutil.copy2(src, dest)
+        self._meta[tid] = {"name": tid, "doc_type": doc_type, "description": description}
+        self._save_meta()
+        return tid
+
     def delete_template(self, template_id: str) -> bool:
         if template_id in BUILTIN_TEMPLATES:
             return False

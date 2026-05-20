@@ -28,6 +28,16 @@ GEMINI_MODELS = [
     ("gemini-1.5-pro", "Gemini 1.5 Pro"),
 ]
 
+OPENROUTER_MODELS = [
+    ("anthropic/claude-opus-4", "Claude Opus 4 (최고 품질)"),
+    ("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5 (빠름)"),
+    ("google/gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("openai/gpt-4o", "GPT-4o"),
+    ("openai/gpt-4o-mini", "GPT-4o Mini (경량)"),
+    ("deepseek/deepseek-r1", "DeepSeek R1"),
+    ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"),
+]
+
 
 def _build_system_prompt(doc_type: str, template_text: str) -> str:
     doc_guide = DOC_TYPE_PROMPTS.get(doc_type, DOC_TYPE_PROMPTS["자유형식"])
@@ -78,7 +88,7 @@ class ClaudeGenerator:
         self.model = model
 
     def _use_thinking(self) -> bool:
-        return self.model in ("claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6")
+        return self.model in ("claude-opus-4-7", "claude-sonnet-4-6")
 
     def generate_streaming(
         self,
@@ -250,12 +260,109 @@ class GeminiGenerator:
         return "자유형식"
 
 
+# ── OpenRouter ────────────────────────────────────────────────────────────────
+
+class OpenRouterGenerator:
+    def __init__(self, api_key: str, model: str = "anthropic/claude-opus-4"):
+        from openai import OpenAI
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
+        self.model = model
+
+    def generate_streaming(
+        self,
+        doc_type: str,
+        input_type: str,
+        input_data: str,
+        template_text: str = "",
+        extra_instructions: str = "",
+        on_chunk: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        system = _build_system_prompt(doc_type, template_text)
+        user = _build_user_prompt(input_type, input_data, doc_type, extra_instructions)
+
+        full_text = []
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=4096,
+            stream=True,
+        )
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = chunk.choices[0].delta.content
+                full_text.append(text)
+                if on_chunk:
+                    on_chunk(text)
+        return "".join(full_text)
+
+    def fill_template_fields(
+        self,
+        template_text: str,
+        fields: list[str],
+        doc_type: str,
+        context: str,
+        on_chunk: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, str]:
+        fields_list = "\n".join(f"- {{{{{f}}}}}: {f} 내용" for f in fields)
+        system = (
+            "당신은 문서 작성 전문가입니다. 템플릿의 각 필드에 들어갈 내용을 생성합니다. "
+            "반드시 아래 형식으로만 응답하세요:\nFIELD:필드명\nCONTENT:\n내용\nEND\n\n"
+            "각 필드마다 위 형식을 반복합니다."
+        )
+        user = (
+            f"문서 유형: {doc_type}\n작성 맥락: {context}\n\n"
+            f"[템플릿]\n{template_text[:1500]}\n\n"
+            f"[채워야 할 필드들]\n{fields_list}\n\n각 필드의 적절한 내용을 생성해주세요."
+        )
+        chunks = []
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=3000,
+            stream=True,
+        )
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = chunk.choices[0].delta.content
+                chunks.append(text)
+                if on_chunk:
+                    on_chunk(text)
+        return _parse_field_response("".join(chunks), fields)
+
+    def suggest_doc_type(self, input_data: str) -> str:
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": (
+                f"다음 내용으로 만들기 적합한 문서 유형을 하나만 답하세요.\n"
+                f"선택지: 보고서, 계획서, 회의록, 제안서, 공문, 보도자료, 기안문, 자유형식\n\n"
+                f"내용: {input_data[:300]}"
+            )}],
+            max_tokens=50,
+        )
+        answer = resp.choices[0].message.content.strip()
+        for t in DOC_TYPE_PROMPTS:
+            if t in answer:
+                return t
+        return "자유형식"
+
+
 # ── Factory ──────────────────────────────────────────────────────────────────
 
 def create_generator(provider: str, api_key: str, model: str):
-    """provider: 'claude' | 'gemini'"""
+    """provider: 'claude' | 'gemini' | 'openrouter'"""
     if provider == "gemini":
         return GeminiGenerator(api_key=api_key, model=model)
+    elif provider == "openrouter":
+        return OpenRouterGenerator(api_key=api_key, model=model)
     else:
         return ClaudeGenerator(api_key=api_key or None, model=model)
 

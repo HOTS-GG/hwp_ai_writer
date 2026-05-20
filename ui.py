@@ -68,13 +68,15 @@ class App(tk.Tk):
 
     def _make_generator(self):
         from ai_generator import create_generator
+        model = self._model_var.get()
         if self._provider == "gemini":
             key = self._gemini_key_var.get().strip() or os.environ.get("GEMINI_API_KEY", "")
-            model = self._model_var.get()
             return create_generator("gemini", key, model)
+        elif self._provider == "openrouter":
+            key = self._openrouter_key_var.get().strip() or os.environ.get("OPENROUTER_API_KEY", "")
+            return create_generator("openrouter", key, model)
         else:
             key = self._apikey_var.get().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
-            model = self._model_var.get()
             return create_generator("claude", key, model)
 
     @property
@@ -268,13 +270,13 @@ class App(tk.Tk):
         self._provider_var = tk.StringVar(value="claude")
         prov_row = tk.Frame(inner, bg=BG_DARK)
         prov_row.pack(fill="x", pady=(2, 8))
-        for val, lbl in [("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)")]:
+        for val, lbl in [("claude", "Claude"), ("gemini", "Gemini"), ("openrouter", "OpenRouter")]:
             rb = tk.Radiobutton(prov_row, text=lbl, variable=self._provider_var,
                                 value=val, bg=BG_DARK, fg=FG_WHITE,
                                 selectcolor=BG_INPUT, activebackground=BG_DARK,
                                 activeforeground=ACCENT, font=FONT_UI,
                                 command=self._on_provider_change)
-            rb.pack(side="left", padx=(0, 16))
+            rb.pack(side="left", padx=(0, 12))
 
         # ── Claude section ──
         self._claude_frame = tk.Frame(inner, bg=BG_DARK)
@@ -297,6 +299,19 @@ class App(tk.Tk):
                  insertbackground=FG_WHITE, relief="flat", font=FONT_MONO, show="*",
                  highlightthickness=1, highlightbackground=BORDER,
                  highlightcolor=ACCENT).pack(fill="x", ipady=4, pady=(2, 6))
+
+        # ── OpenRouter section ──
+        self._openrouter_frame = tk.Frame(inner, bg=BG_DARK)
+        # (shown when OpenRouter selected)
+
+        self._label(self._openrouter_frame, "OpenRouter API Key").pack(anchor="w")
+        self._openrouter_key_var = tk.StringVar(value=os.environ.get("OPENROUTER_API_KEY", ""))
+        tk.Entry(self._openrouter_frame, textvariable=self._openrouter_key_var, bg=BG_INPUT, fg=FG_WHITE,
+                 insertbackground=FG_WHITE, relief="flat", font=FONT_MONO, show="*",
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT).pack(fill="x", ipady=4, pady=(2, 2))
+        tk.Label(self._openrouter_frame, text="openrouter.ai 에서 키 발급",
+                 bg=BG_DARK, fg=FG_MUTED, font=FONT_SM).pack(anchor="w", pady=(0, 6))
 
         # ── Model selector (shared, values change by provider) ──
         self._label(inner, "모델").pack(anchor="w", pady=(6, 2))
@@ -327,27 +342,32 @@ class App(tk.Tk):
 
     def _on_provider_change(self):
         self._provider = self._provider_var.get()
-        self._gen = None  # reset so next call re-creates with new provider
+        self._gen = None
         self._update_model_list()
+        self._claude_frame.pack_forget()
+        self._gemini_frame.pack_forget()
+        self._openrouter_frame.pack_forget()
         if self._provider == "gemini":
-            self._claude_frame.pack_forget()
             self._gemini_frame.pack(fill="x")
+        elif self._provider == "openrouter":
+            self._openrouter_frame.pack(fill="x")
         else:
-            self._gemini_frame.pack_forget()
             self._claude_frame.pack(fill="x")
 
     def _update_model_list(self):
-        from ai_generator import CLAUDE_MODELS, GEMINI_MODELS
-        if self._provider_var.get() == "gemini":
-            values = [m[0] for m in GEMINI_MODELS]
-            labels = [m[1] for m in GEMINI_MODELS]
+        from ai_generator import CLAUDE_MODELS, GEMINI_MODELS, OPENROUTER_MODELS
+        provider = self._provider_var.get()
+        if provider == "gemini":
+            models = GEMINI_MODELS
+        elif provider == "openrouter":
+            models = OPENROUTER_MODELS
         else:
-            values = [m[0] for m in CLAUDE_MODELS]
-            labels = [m[1] for m in CLAUDE_MODELS]
+            models = CLAUDE_MODELS
+        values = [m[0] for m in models]
+        labels = [m[1] for m in models]
         self._model_combo["values"] = labels
         self._model_combo.current(0)
         self._model_var.set(values[0])
-        # Store value→label mapping for reverse lookup
         self._model_values = values
         self._model_combo.bind("<<ComboboxSelected>>", self._on_model_select)
 
@@ -458,13 +478,12 @@ class App(tk.Tk):
         if not path:
             return
         name = Path(path).stem
-        import shutil
-        dest = Path(__file__).parent / "templates" / Path(path).name
-        shutil.copy2(path, dest)
-        self.tmgr._meta[name] = {"name": name, "doc_type": "자유형식", "description": ""}
-        self.tmgr._save_meta()
-        self._load_templates()
-        messagebox.showinfo("완료", f"'{name}' 템플릿을 가져왔습니다.")
+        try:
+            self.tmgr.import_hwp_template(path)
+            self._load_templates()
+            messagebox.showinfo("완료", f"'{name}' 템플릿을 가져왔습니다.")
+        except Exception as e:
+            messagebox.showerror("가져오기 실패", str(e))
 
     def _delete_template(self):
         sel = self._tpl_listbox.curselection()
@@ -490,13 +509,15 @@ class App(tk.Tk):
         # Check API key
         if self._provider == "gemini":
             if not os.environ.get("GEMINI_API_KEY") and not self._gemini_key_var.get().strip():
-                messagebox.showerror("API Key 필요",
-                                     "설정 탭에서 Gemini API Key를 입력해주세요.")
+                messagebox.showerror("API Key 필요", "설정 탭에서 Gemini API Key를 입력해주세요.")
+                return
+        elif self._provider == "openrouter":
+            if not os.environ.get("OPENROUTER_API_KEY") and not self._openrouter_key_var.get().strip():
+                messagebox.showerror("API Key 필요", "설정 탭에서 OpenRouter API Key를 입력해주세요.")
                 return
         else:
             if not os.environ.get("ANTHROPIC_API_KEY") and not self._apikey_var.get().strip():
-                messagebox.showerror("API Key 필요",
-                                     "설정 탭에서 Anthropic API Key를 입력해주세요.")
+                messagebox.showerror("API Key 필요", "설정 탭에서 Anthropic API Key를 입력해주세요.")
                 return
 
         self._gen_btn.config(state="disabled")
@@ -548,7 +569,8 @@ class App(tk.Tk):
     def _on_gen_done(self, result: str):
         self._progress.stop()
         self._gen_btn.config(state="normal")
-        provider_lbl = "Gemini" if self._provider == "gemini" else "Claude"
+        labels = {"gemini": "Gemini", "openrouter": "OpenRouter"}
+        provider_lbl = labels.get(self._provider, "Claude")
         self._set_status(f"[{provider_lbl}] 생성 완료 ({len(result)}자)")
 
     @staticmethod
@@ -581,6 +603,17 @@ class App(tk.Tk):
         # Connection error
         if "connection" in r or "timeout" in r:
             return "네트워크 연결 오류\n인터넷 연결을 확인하고 다시 시도해주세요."
+        # OpenRouter insufficient credits
+        if "credit balance" in r or "insufficient credits" in r or "402" in r:
+            return (
+                "OpenRouter 크레딧이 부족합니다.\n\n"
+                "해결 방법:\n"
+                "  1. openrouter.ai 에서 크레딧 충전\n"
+                "  2. 무료 모델(예: Llama)로 변경"
+            )
+        # Generic auth error (covers OpenRouter 401)
+        if "no auth" in r or "unauthorized" in r:
+            return "API Key가 유효하지 않습니다.\n설정 탭에서 올바른 키를 입력해주세요."
         # Fallback: show first 300 chars only
         return raw[:300] + ("..." if len(raw) > 300 else "")
 
@@ -634,12 +667,31 @@ class App(tk.Tk):
                 self.after(0, lambda: messagebox.showinfo("저장 완료",
                     f"HWP 파일로 저장되었습니다:\n{path}"))
             except Exception as e:
-                # Fallback: save as text with .hwp extension note
-                self.after(0, lambda: messagebox.showerror("HWP 저장 실패",
-                    f"HWP COM 연결 실패로 텍스트로 저장합니다.\n{e}"))
-                txt_path = path.replace(".hwp", "_내용.txt")
-                Path(txt_path).write_text(text, encoding="utf-8")
-                self.after(0, lambda: self._set_status(f"텍스트로 저장됨"))
+                err_msg = str(e)  # Python 3: except 블록 종료 시 e가 삭제되므로 미리 캡처
+                # 폴백 1: HWP COM 없이 HWPX 생성 (한글에서 열 수 있음)
+                hwpx_path = (path[:-4] if path.lower().endswith(".hwp") else path) + ".hwpx"
+                try:
+                    from hwp_controller import HwpController
+                    HwpController.create_hwpx(hwpx_path, text)
+                    saved_name = Path(hwpx_path).name
+                    self.after(0, lambda: messagebox.showwarning(
+                        "HWPX로 저장",
+                        f"HWP COM을 사용할 수 없어 HWPX 형식으로 저장했습니다.\n"
+                        f"한글에서 열 수 있습니다.\n\n저장 위치: {hwpx_path}\n\n"
+                        f"원인: {err_msg}"
+                    ))
+                    self.after(0, lambda: self._set_status(f"HWPX 저장됨: {saved_name}"))
+                except Exception as e2:
+                    # 폴백 2: 최후 수단으로 텍스트 저장
+                    txt_path = (path[:-4] if path.lower().endswith(".hwp") else path) + "_내용.txt"
+                    Path(txt_path).write_text(text, encoding="utf-8")
+                    err2_msg = str(e2)
+                    self.after(0, lambda: messagebox.showerror(
+                        "저장 실패",
+                        f"HWP/HWPX 저장 모두 실패하여 텍스트로 저장했습니다.\n"
+                        f"저장 위치: {txt_path}\n\n원인: {err_msg}"
+                    ))
+                    self.after(0, lambda: self._set_status("텍스트로 저장됨"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -655,10 +707,13 @@ class App(tk.Tk):
     def _save_api_key(self):
         claude_key = self._apikey_var.get().strip()
         gemini_key = self._gemini_key_var.get().strip()
+        openrouter_key = self._openrouter_key_var.get().strip()
         if claude_key:
             os.environ["ANTHROPIC_API_KEY"] = claude_key
         if gemini_key:
             os.environ["GEMINI_API_KEY"] = gemini_key
+        if openrouter_key:
+            os.environ["OPENROUTER_API_KEY"] = openrouter_key
         self._gen = None
         self._set_status("설정 저장됨")
         messagebox.showinfo("저장", "설정이 이 세션에 적용되었습니다.")
@@ -672,8 +727,9 @@ class App(tk.Tk):
                 self.after(0, lambda: self._hwp_status_var.set("연결됨 ✓"))
                 self.after(0, lambda: messagebox.showinfo("연결 성공", "HWP COM 연결 성공!"))
             except Exception as e:
+                err_msg = str(e)
                 self.after(0, lambda: self._hwp_status_var.set("연결 실패 ✗"))
-                self.after(0, lambda: messagebox.showerror("연결 실패", str(e)))
+                self.after(0, lambda: messagebox.showerror("연결 실패", err_msg))
         threading.Thread(target=run, daemon=True).start()
 
     def _set_status(self, msg: str):

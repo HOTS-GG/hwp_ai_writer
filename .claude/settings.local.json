@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /s /b \"C:\\\\Users\\\\User\\\\Desktop\\\\hwp_ai_writer\\\\hwp_ai_writer\")",
+      "Bash(python -c \"import openai; print\\(openai.__version__\\)\")",
+      "PowerShell(py --version)",
+      "PowerShell(py -c \"import openai; print\\('openai:', openai.__version__\\)\")",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\User\" -Directory | Where-Object { $_.Name -match \"python|conda|env|venv\" } | Select-Object FullName)",
+      "PowerShell($env:PATH = [System.Environment]::GetEnvironmentVariable\\(\"PATH\", \"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"PATH\", \"User\"\\); python --version 2>&1)"
+    ]
+  }
+}

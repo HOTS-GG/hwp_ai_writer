@@ -22,7 +22,11 @@ class HwpController:
         try:
             import win32com.client
             self.hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
-            self.hwp.RegisterModule("FilePathCheckDLL", "SecurityModule")
+            # SecurityModule: 파일 경로 제한 해제용. 실패해도 연결은 유지
+            try:
+                self.hwp.RegisterModule("FilePathCheckDLL", "SecurityModule")
+            except Exception:
+                pass
             self._connected = True
             return True
         except Exception as e:
@@ -108,13 +112,30 @@ class HwpController:
             self.hwp.HAction.Execute("AllReplace", param.HSet)
 
     def insert_text(self, text: str, position: str = "end"):
-        """Insert text at given position (start/end/cursor)."""
+        """Insert text at given position (start/end/cursor).
+        클립보드 경유 방식을 우선 사용 — 긴 한국어 텍스트에 더 안정적."""
         if not self.is_connected():
             raise RuntimeError("HWP가 연결되지 않았습니다.")
         if position == "end":
-            self.hwp.MovePos(6)  # Move to end
+            self.hwp.MovePos(6)
         elif position == "start":
-            self.hwp.MovePos(5)  # Move to start
+            self.hwp.MovePos(5)
+
+        # 1차: 클립보드 경유 붙여넣기 (한국어·긴 텍스트에 신뢰성 높음)
+        try:
+            import win32clipboard
+            import win32con
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            win32clipboard.CloseClipboard()
+            self.hwp.HAction.GetDefault("Paste", self.hwp.HParameterSet.HSelectionAll.HSet)
+            self.hwp.HAction.Execute("Paste", self.hwp.HParameterSet.HSelectionAll.HSet)
+            return
+        except Exception:
+            pass
+
+        # 2차: InsertText 액션 (폴백)
         self.hwp.HAction.GetDefault("InsertText", self.hwp.HParameterSet.HInsertText.HSet)
         self.hwp.HParameterSet.HInsertText.Text = text
         self.hwp.HAction.Execute("InsertText", self.hwp.HParameterSet.HInsertText.HSet)
@@ -124,6 +145,14 @@ class HwpController:
         path = str(Path(path).resolve())
         fmt_map = {"HWP": "HWP", "HWPX": "HWPX", "PDF": "PDF", "DOCX": "DOCX"}
         fmt = fmt_map.get(format.upper(), "HWP")
+
+        # 1차: SaveAs 직접 메서드 (더 간단하고 안정적)
+        try:
+            return bool(self.hwp.SaveAs(path, fmt, ""))
+        except Exception:
+            pass
+
+        # 2차: FileSaveAs 액션 (폴백)
         param = self.hwp.HParameterSet.HFileSaveAs
         self.hwp.HAction.GetDefault("FileSaveAs", param.HSet)
         param.filename = path
@@ -140,6 +169,59 @@ class HwpController:
             self.hwp = None
             self._connected = False
 
+    @staticmethod
+    def create_hwpx(path: str, text: str) -> None:
+        """HWP 설치 없이 HWPX 파일을 생성합니다. 한글 2010 이상에서 열 수 있습니다."""
+        import zipfile
+
+        def esc(s: str) -> str:
+            return (s.replace("&", "&amp;").replace("<", "&lt;")
+                     .replace(">", "&gt;").replace('"', "&quot;"))
+
+        # 본문: 줄바꿈을 단락으로 변환
+        paras = "\n".join(
+            f'  <hp:p><hp:run><hc:t>{esc(ln)}</hc:t></hp:run></hp:p>'
+            for ln in text.split("\n")
+        )
+
+        section_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2012/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2012/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2012/char">\n'
+            f'{paras}\n'
+            '</hs:sec>'
+        )
+
+        container_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<container>\n'
+            '  <rootfiles>\n'
+            '    <rootfile full-path="Contents/content.hpf"/>\n'
+            '  </rootfiles>\n'
+            '</container>'
+        )
+
+        content_hpf = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<package xmlns="http://www.idpf.org/2007/opf">\n'
+            '  <metadata/>\n'
+            '  <manifest>\n'
+            '    <item id="section0" href="section0.xml" media-type="application/xml"/>\n'
+            '  </manifest>\n'
+            '  <spine><itemref idref="section0"/></spine>\n'
+            '</package>'
+        )
+
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            # mimetype은 반드시 첫 번째, 비압축으로 저장
+            info = zipfile.ZipInfo("mimetype")
+            info.compress_type = zipfile.ZIP_STORED
+            zf.writestr(info, "application/hwp+zip")
+            zf.writestr("META-INF/container.xml", container_xml)
+            zf.writestr("Contents/content.hpf", content_hpf)
+            zf.writestr("Contents/section0.xml", section_xml)
+
 
 # ── Standalone HWP reader (no HWP installation needed) ──────────────────────
 
@@ -154,7 +236,8 @@ class HwpFileReader:
     MINI_CUTOFF = 4096
 
     def __init__(self, path: str):
-        self.data = open(path, 'rb').read()
+        with open(path, 'rb') as f:
+            self.data = f.read()
         self._fat: list[int] = []
         self._mini_fat: list[int] = []
         self._directory: list[dict] = []
