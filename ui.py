@@ -1055,6 +1055,8 @@ class App(tk.Tk):
         self._saved_lbl = tk.StringVar(value="변경 사항은 자동으로 저장됩니다.")
         tk.Label(bottom, textvariable=self._saved_lbl, bg=BG, fg=MUTED, font=FONT_SM).pack(side="left")
         button(bottom, "미리보기 캐시 비우기", self._clear_cache).pack(side="right")
+        tk.Label(bottom, text=f"한큐 HanQ  v{cfg.APP_VERSION}", bg=BG, fg=MUTED, font=FONT_SM
+                 ).pack(side="right", padx=12)
 
     CLI_GUIDE = {
         "claude_code": ("Claude Pro/Max 구독이 있으면 사용할 수 있습니다.",

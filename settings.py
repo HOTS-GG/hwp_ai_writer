@@ -6,6 +6,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+APP_VERSION = "1.0.0"
+
 APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "HWP_AI_Writer"
 SETTINGS_FILE = APP_DIR / "settings.json"
 # 한글은 AppData\Roaming 아래로는 쪽 이미지를 쓰지 못하므로 Temp를 사용

@@ -7,3 +7,5 @@ legacy/
 rag/
 *.spec
 .env
+installer_output/
+installer/안내.txt
