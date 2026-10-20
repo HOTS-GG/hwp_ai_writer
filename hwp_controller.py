@@ -11,6 +11,85 @@ from pathlib import Path
 from typing import Optional
 
 
+def _parse_inline_md(text: str) -> list[tuple[str, bool, bool]]:
+    """마크다운 인라인 서식을 (텍스트, bold, italic) 세그먼트 리스트로 분해합니다."""
+    segments = []
+    pattern = re.compile(r'(\*\*\*.*?\*\*\*|\*\*.*?\*\*|\*.*?\*|___.*?___|__.*?__|_.*?_|`.*?`)')
+    pos = 0
+    for m in pattern.finditer(text):
+        if m.start() > pos:
+            segments.append((text[pos:m.start()], False, False))
+        raw = m.group(0)
+        if raw.startswith('***') or raw.startswith('___'):
+            segments.append((raw[3:-3], True, True))
+        elif raw.startswith('**') or raw.startswith('__'):
+            segments.append((raw[2:-2], True, False))
+        elif raw.startswith('`'):
+            segments.append((raw[1:-1], False, False))
+        else:
+            segments.append((raw[1:-1], False, True))
+        pos = m.end()
+    if pos < len(text):
+        segments.append((text[pos:], False, False))
+    return segments
+
+
+def markdown_to_plain(text: str) -> str:
+    """마크다운 기호를 제거하여 읽기 좋은 평문으로 변환합니다 (미리보기용)."""
+    result = []
+    in_code = False
+    code_lang = ""
+
+    for line in text.splitlines():
+        # ── 코드 펜스 ──
+        fence = re.match(r'^(`{3,}|~{3,})(.*)', line.strip())
+        if fence:
+            if in_code:
+                in_code = False
+            else:
+                in_code = True
+                code_lang = fence.group(2).strip()
+                result.append(f'[코드{": " + code_lang if code_lang else ""}]')
+            continue
+        if in_code:
+            result.append(line)
+            continue
+
+        # ── 제목 ──
+        h = re.match(r'^(#{1,6})\s+(.*)', line)
+        if h:
+            result.append(h.group(2).strip())
+            continue
+
+        # ── 구분선 ──
+        if re.match(r'^[-*_]{3,}\s*$', line.strip()):
+            result.append('─' * 40)
+            continue
+
+        # ── 표 행 ──
+        if line.strip().startswith('|'):
+            cols = [c.strip() for c in line.strip().strip('|').split('|')]
+            # 구분자 행(--- 만 있는 행) 건너뜀
+            if all(re.match(r'^[-: ]+$', c) for c in cols if c):
+                continue
+            result.append('  '.join(cols))
+            continue
+
+        # ── 인라인 서식 제거 ──
+        line = re.sub(r'\*\*\*(.*?)\*\*\*', r'\1', line)
+        line = re.sub(r'\*\*(.*?)\*\*',     r'\1', line)
+        line = re.sub(r'\*(.*?)\*',          r'\1', line)
+        line = re.sub(r'___(.*?)___',        r'\1', line)
+        line = re.sub(r'__(.*?)__',          r'\1', line)
+        line = re.sub(r'_(.*?)_',            r'\1', line)
+        line = re.sub(r'`([^`]+)`',          r'\1', line)
+        line = re.sub(r'^[-*+]\s+',          '• ',  line)
+
+        result.append(line)
+
+    return '\n'.join(result)
+
+
 # ── COM-based controller (HWP must be running) ──────────────────────────────
 
 class HwpController:
@@ -23,10 +102,8 @@ class HwpController:
             import win32com.client
             self.hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
             # SecurityModule: 파일 경로 제한 해제용. 실패해도 연결은 유지
-            try:
-                self.hwp.RegisterModule("FilePathCheckDLL", "SecurityModule")
-            except Exception:
-                pass
+            import hwp_security
+            hwp_security.register(self.hwp)
             self._connected = True
             return True
         except Exception as e:
@@ -45,8 +122,7 @@ class HwpController:
     def new_document(self):
         if not self.is_connected():
             self.connect()
-        self.hwp.HAction.GetDefault("FileNew", self.hwp.HParameterSet.HFileNew.HSet)
-        self.hwp.HAction.Execute("FileNew", self.hwp.HParameterSet.HFileNew.HSet)
+        self.hwp.HAction.Run("FileNew")
 
     def read_text(self) -> str:
         """Extract all visible text from the open document."""
@@ -159,6 +235,150 @@ class HwpController:
         param.Format = fmt
         param.version = "5.0.0.0"
         return bool(self.hwp.HAction.Execute("FileSaveAs", param.HSet))
+
+    def write_markdown(self, text: str):
+        """마크다운 텍스트를 파싱하여 HWP 서식으로 작성합니다."""
+        if not self.is_connected():
+            raise RuntimeError("HWP가 연결되지 않았습니다.")
+        in_code = False
+        code_buf: list[str] = []
+
+        for line in text.splitlines():
+            fence = re.match(r'^(`{3,}|~{3,})(.*)', line.strip())
+            if fence:
+                if in_code:
+                    # 코드 블록 종료 → 모아서 삽입
+                    in_code = False
+                    self._md_insert_code_block('\n'.join(code_buf))
+                    code_buf = []
+                else:
+                    in_code = True
+                    lang = fence.group(2).strip()
+                    if lang:
+                        self._md_insert_inline(f'[{lang}]', indent=False)
+                continue
+
+            if in_code:
+                code_buf.append(line)
+                continue
+
+            # 표 행
+            if line.strip().startswith('|'):
+                cols = [c.strip() for c in line.strip().strip('|').split('|')]
+                if all(re.match(r'^[-: ]+$', c) for c in cols if c):
+                    continue  # 구분자 행 건너뜀
+                self._md_insert_inline('   '.join(cols))
+                continue
+
+            self._md_write_line(line)
+
+        # 미닫힌 코드 블록 처리
+        if in_code and code_buf:
+            self._md_insert_code_block('\n'.join(code_buf))
+
+    # ── 마크다운 헬퍼 ─────────────────────────────────────────────────
+
+    def _md_write_line(self, line: str):
+        h = re.match(r'^(#{1,6})\s+(.*)', line)
+        if h:
+            level = len(h.group(1))
+            self._md_insert_heading(h.group(2).strip(), level)
+            return
+        if re.match(r'^[-*_]{3,}\s*$', line.strip()):
+            self._md_insert_hr()
+            return
+        bullet = re.match(r'^(\s*)([-*+])\s+(.*)', line)
+        if bullet:
+            self._md_insert_inline(bullet.group(3), indent=True)
+            return
+        num = re.match(r'^(\s*)\d+\.\s+(.*)', line)
+        if num:
+            self._md_insert_inline(num.group(2), indent=True)
+            return
+        if line.strip() == '':
+            self._hwp_break_para()
+        else:
+            self._md_insert_inline(line)
+
+    def _md_insert_heading(self, text: str, level: int):
+        sizes  = {1: 2200, 2: 1800, 3: 1600, 4: 1400, 5: 1200, 6: 1100}
+        size = sizes.get(level, 1200)
+        plain = re.sub(r'\*+|_+|`', '', text)
+        self._hwp_set_charshape(bold=True, size=size)
+        self._hwp_insert_text(plain)
+        self._hwp_reset_charshape()
+        self._hwp_break_para()
+
+    def _md_insert_hr(self):
+        self._hwp_insert_text('─' * 40)
+        self._hwp_break_para()
+
+    def _md_insert_code_block(self, code: str):
+        self._hwp_set_charshape(bold=False, italic=False, size=900,
+                                face="courier new")
+        for line in code.splitlines():
+            self._hwp_insert_text(line or ' ')
+            self._hwp_break_para()
+        self._hwp_reset_charshape()
+
+    def _md_insert_inline(self, text: str, indent: bool = False):
+        if indent:
+            self._hwp_insert_text('  ')
+        for content, bold, italic in _parse_inline_md(text):
+            if content:
+                self._hwp_set_charshape(bold=bold, italic=italic)
+                self._hwp_insert_text(content)
+        self._hwp_reset_charshape()
+        self._hwp_break_para()
+
+    def _hwp_insert_text(self, text: str):
+        p = self.hwp.HParameterSet.HInsertText
+        self.hwp.HAction.GetDefault("InsertText", p.HSet)
+        p.Text = text
+        self.hwp.HAction.Execute("InsertText", p.HSet)
+
+    def _hwp_break_para(self):
+        self.hwp.HAction.Run("BreakPara")
+
+    def _hwp_set_charshape(self, bold: bool = False, italic: bool = False,
+                           size: int = 0, face: str = ""):
+        p = self.hwp.HParameterSet.HCharShape
+        self.hwp.HAction.GetDefault("CharShape", p.HSet)
+        p.Bold   = 1 if bold   else 0
+        p.Italic = 1 if italic else 0
+        if size:
+            p.Height = size
+        if face:
+            try:
+                p.FaceNameHangul  = face
+                p.FaceNameLatin   = face
+            except Exception:
+                pass
+        self.hwp.HAction.Execute("CharShape", p.HSet)
+
+    def _hwp_reset_charshape(self):
+        p = self.hwp.HParameterSet.HCharShape
+        self.hwp.HAction.GetDefault("CharShape", p.HSet)
+        p.Bold = 0
+        p.Italic = 0
+        p.Height = 1000  # 10pt 기본
+        self.hwp.HAction.Execute("CharShape", p.HSet)
+
+    def run_macro(self, code: str) -> tuple[bool, str]:
+        """HWP JavaScript 매크로를 실행합니다. (성공, 오류메시지) 반환."""
+        if not self.is_connected():
+            self.connect()
+
+        # Python exec 방식: JS 엔진 없이 COM API 직접 호출
+        try:
+            ns: dict = {}
+            exec(code, {"__builtins__": __builtins__}, ns)  # def main(hwp) 정의
+            if "main" not in ns:
+                return False, "생성된 코드에 'def main(hwp):' 함수가 없습니다."
+            ns["main"](self.hwp)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     def close(self):
         if self.hwp:

@@ -1,805 +1,1274 @@
-"""
-tkinter UI for HWP AI Document Generator.
-"""
+"""한큐(HanQ) — tkinter UI."""
+import datetime
 import os
-import sys
+import re
+import shutil
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
 from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+import settings as cfg
+from settings import (ALL_PROVIDERS, BUILTIN_FORMS_DIR, CACHE_DIR, CLI_PROVIDERS,
+                      DEFAULT_MODELS, PROVIDERS)
+
+# ── 색상 / 글꼴 ──────────────────────────────────────────────────────────
+BG = "#f4f6fa"
+CARD = "#ffffff"
+HEADER = "#1f4e96"
+ACCENT = "#1f6feb"
+ACCENT_DARK = "#1957bd"
+TEXT = "#1d2939"
+MUTED = "#667085"
+BORDER = "#d0d7e2"
+SOFT = "#e8eef8"
+DANGER = "#d92d20"
+PREVIEW_BG = "#8a94a6"
+FONT = ("Malgun Gothic", 10)
+FONT_B = ("Malgun Gothic", 10, "bold")
+FONT_SM = ("Malgun Gothic", 9)
+FONT_H = ("Malgun Gothic", 12, "bold")
+
+APP_NAME = "한큐"
+APP_NAME_EN = "HanQ"
+FREE_FORM = "자유 작성 (기본 서식)"
 
 
-# ── Colour palette ─────────────────────────────────────────────────────────
-BG_DARK   = "#1e1e2e"
-BG_PANEL  = "#2a2a3e"
-BG_INPUT  = "#313145"
-FG_WHITE  = "#cdd6f4"
-FG_MUTED  = "#6c7086"
-ACCENT    = "#89b4fa"
-ACCENT2   = "#a6e3a1"
-WARN      = "#f38ba8"
-BORDER    = "#45475a"
-BTN_BG    = "#313145"
-BTN_ACT   = "#45475a"
-FONT_UI   = ("Malgun Gothic", 10)
-FONT_MONO = ("Consolas", 10)
-FONT_BIG  = ("Malgun Gothic", 12, "bold")
-FONT_SM   = ("Malgun Gothic", 9)
+def button(parent, text, command, kind="normal", **kw):
+    colors = {
+        "primary": (ACCENT, "#ffffff", ACCENT_DARK),
+        "danger": (CARD, DANGER, "#fdecea"),
+        "normal": (SOFT, TEXT, "#d8e3f5"),
+    }[kind]
+    return tk.Button(parent, text=text, command=command, bg=colors[0], fg=colors[1],
+                     activebackground=colors[2], activeforeground=colors[1],
+                     relief="flat", bd=0, padx=12, pady=6, cursor="hand2",
+                     font=FONT_B if kind == "primary" else FONT, **kw)
 
 
-def styled_button(parent, text, command, width=None, accent=False, danger=False):
-    bg = ACCENT if accent else (WARN if danger else BTN_BG)
-    fg = BG_DARK if (accent or danger) else FG_WHITE
-    kwargs = dict(text=text, command=command, bg=bg, fg=fg,
-                  activebackground=ACCENT2 if accent else BTN_ACT,
-                  activeforeground=BG_DARK if accent else FG_WHITE,
-                  relief="flat", bd=0, padx=10, pady=6, cursor="hand2",
-                  font=FONT_UI)
-    if width:
-        kwargs["width"] = width
-    return tk.Button(parent, **kwargs)
+def display_name(path: Path) -> str:
+    return re.sub(r"^\d+_", "", path.stem)
 
+
+def safe_filename(s: str) -> str:
+    s = re.sub(r'[\\/:*?"<>|\r\n]+', " ", s).strip()
+    return re.sub(r"\s+", " ", s)[:80] or "문서"
+
+
+# ── 미리보기 패널 ─────────────────────────────────────────────────────────
+
+class PreviewPane(tk.Frame):
+    """쪽 이미지를 세로로 이어 보여주는 큰 미리보기."""
+
+    def __init__(self, parent, title: str, zoom: int = 100):
+        super().__init__(parent, bg=BG)
+        self._pages: list[str] = []
+        self._photos = []
+        self._zoom = zoom
+
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", pady=(0, 6))
+        self._title_var = tk.StringVar(value=title)
+        tk.Label(bar, textvariable=self._title_var, bg=BG, fg=TEXT, font=FONT_H).pack(side="left")
+        self.actions = tk.Frame(bar, bg=BG)
+        self.actions.pack(side="right")
+        zoom_box = tk.Frame(bar, bg=BG)
+        zoom_box.pack(side="right", padx=(0, 12))
+        button(zoom_box, "－", lambda: self.set_zoom(self._zoom - 10)).pack(side="left")
+        self._zoom_var = tk.StringVar(value=f"{zoom}%")
+        tk.Label(zoom_box, textvariable=self._zoom_var, bg=BG, fg=MUTED, font=FONT_SM,
+                 width=5).pack(side="left")
+        button(zoom_box, "＋", lambda: self.set_zoom(self._zoom + 10)).pack(side="left")
+        self._info_var = tk.StringVar(value="")
+        tk.Label(bar, textvariable=self._info_var, bg=BG, fg=MUTED, font=FONT_SM).pack(side="right", padx=8)
+
+        body = tk.Frame(self, bg=PREVIEW_BG, highlightthickness=1, highlightbackground=BORDER)
+        body.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(body, bg=PREVIEW_BG, highlightthickness=0)
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda e: self._layout())
+        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+        self.show_message("미리볼 문서가 없습니다.")
+
+    def _wheel(self, e):
+        if e.state & 0x4:
+            self.set_zoom(self._zoom + (10 if e.delta > 0 else -10))
+        else:
+            self.canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
+
+    def set_title(self, s):
+        self._title_var.set(s)
+
+    def set_zoom(self, z):
+        self._zoom = max(30, min(250, z))
+        self._zoom_var.set(f"{self._zoom}%")
+        self._layout()
+
+    def show_message(self, msg: str):
+        self._pages = []
+        self._text = None
+        self._message = msg
+        self._info_var.set("")
+        self._layout()
+
+    def show_text(self, text: str):
+        self._pages = []
+        self._text = text
+        self._message = None
+        self._info_var.set("텍스트 미리보기")
+        self._layout()
+
+    def show_pages(self, pages: list[str], note: str = ""):
+        self._pages = pages
+        self._text = None
+        self._message = None if pages else "미리보기 이미지가 없습니다."
+        self._info_var.set(f"{len(pages)}쪽 {note}".strip() if pages else note)
+        self.canvas.yview_moveto(0)
+        self._layout()
+
+    def _layout(self):
+        from PIL import Image, ImageTk
+        c = self.canvas
+        c.delete("all")
+        self._photos = []
+        cw = max(c.winfo_width(), 200)
+        if self._pages:
+            y = 16
+            for path in self._pages:
+                try:
+                    im = Image.open(path)
+                except OSError:
+                    continue
+                w = int(im.width * self._zoom / 100)
+                h = int(im.height * self._zoom / 100)
+                im = im.resize((max(w, 1), max(h, 1)), Image.LANCZOS)
+                ph = ImageTk.PhotoImage(im)
+                self._photos.append(ph)
+                x = max((cw - w) // 2, 8)
+                c.create_rectangle(x + 3, y + 3, x + w + 3, y + h + 3, fill="#5b6475", outline="")
+                c.create_image(x, y, image=ph, anchor="nw")
+                y += h + 16
+            c.configure(scrollregion=(0, 0, cw, y))
+        elif getattr(self, "_text", None):
+            w = min(cw - 40, 820)
+            x = (cw - w) // 2
+            item = c.create_text(x + 30, 46, text=self._text, anchor="nw", width=w - 60,
+                                 font=("Malgun Gothic", 10), fill=TEXT)
+            bbox = c.bbox(item)
+            c.create_rectangle(x, 16, x + w, bbox[3] + 30, fill="#ffffff", outline="")
+            c.tag_raise(item)
+            c.configure(scrollregion=(0, 0, cw, bbox[3] + 50))
+        else:
+            c.create_text(cw // 2, 120, text=getattr(self, "_message", "") or "",
+                          fill="#ffffff", font=FONT_H)
+            c.configure(scrollregion=(0, 0, cw, 240))
+
+
+# ── 메인 앱 ───────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("HWP AI 문서 생성기")
-        self.geometry("1100x750")
-        self.minsize(900, 600)
-        self.configure(bg=BG_DARK)
-        self.resizable(True, True)
-
-        # Lazy-loaded modules
-        self._gen = None
-        self._tmgr = None
-        self._templates: list[dict] = []
-        self._provider = "claude"  # 'claude' | 'gemini'
-
-        self._build_ui()
-        self._load_templates()
-
-    # ── Lazy loaders ──────────────────────────────────────────────────────
-
-    @property
-    def gen(self):
-        if self._gen is None:
-            self._gen = self._make_generator()
-        return self._gen
-
-    def _make_generator(self):
-        from ai_generator import create_generator
-        model = self._model_var.get()
-        if self._provider == "gemini":
-            key = self._gemini_key_var.get().strip() or os.environ.get("GEMINI_API_KEY", "")
-            return create_generator("gemini", key, model)
-        elif self._provider == "openrouter":
-            key = self._openrouter_key_var.get().strip() or os.environ.get("OPENROUTER_API_KEY", "")
-            return create_generator("openrouter", key, model)
-        else:
-            key = self._apikey_var.get().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
-            return create_generator("claude", key, model)
-
-    @property
-    def tmgr(self):
-        if self._tmgr is None:
-            from template_manager import TemplateManager
-            self._tmgr = TemplateManager()
-        return self._tmgr
-
-    # ── UI Construction ────────────────────────────────────────────────────
-
-    def _build_ui(self):
-        # ── Header ──────────────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=BG_PANEL, pady=12)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text="✦  HWP AI 문서 생성기", bg=BG_PANEL, fg=ACCENT,
-                 font=("Malgun Gothic", 16, "bold")).pack(side="left", padx=20)
-        self._status_var = tk.StringVar(value="준비")
-        tk.Label(hdr, textvariable=self._status_var, bg=BG_PANEL,
-                 fg=FG_MUTED, font=FONT_SM).pack(side="right", padx=20)
-
-        # ── Main paned layout ──────────────────────────────────────────
-        pw = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
-                            sashwidth=4, sashrelief="flat")
-        pw.pack(fill="both", expand=True, padx=8, pady=8)
-
-        left = tk.Frame(pw, bg=BG_DARK)
-        right = tk.Frame(pw, bg=BG_DARK)
-        pw.add(left, minsize=380, width=420)
-        pw.add(right, minsize=400)
-
-        self._build_left(left)
-        self._build_right(right)
-
-    def _build_left(self, parent):
-        nb = ttk.Notebook(parent)
-        nb.pack(fill="both", expand=True)
-        self._style_notebook(nb)
-
-        gen_frame = tk.Frame(nb, bg=BG_DARK)
-        tpl_frame = tk.Frame(nb, bg=BG_DARK)
-        cfg_frame = tk.Frame(nb, bg=BG_DARK)
-        nb.add(gen_frame, text="  생성  ")
-        nb.add(tpl_frame, text="  템플릿  ")
-        nb.add(cfg_frame, text="  설정  ")
-
-        self._build_gen_tab(gen_frame)
-        self._build_template_tab(tpl_frame)
-        self._build_config_tab(cfg_frame)
-
-    def _style_notebook(self, nb):
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("TNotebook", background=BG_DARK, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG_PANEL, foreground=FG_MUTED,
-                        padding=[12, 6], font=FONT_UI)
-        style.map("TNotebook.Tab",
-                  background=[("selected", BG_INPUT)],
-                  foreground=[("selected", ACCENT)])
-
-    def _label(self, parent, text, small=False):
-        return tk.Label(parent, text=text, bg=BG_DARK,
-                        fg=FG_MUTED if small else FG_WHITE,
-                        font=FONT_SM if small else FONT_UI, anchor="w")
-
-    def _entry_row(self, parent, label_text, var, pady=4):
-        row = tk.Frame(parent, bg=BG_DARK)
-        row.pack(fill="x", pady=(pady, 0))
-        self._label(row, label_text).pack(anchor="w")
-        e = tk.Entry(row, textvariable=var, bg=BG_INPUT, fg=FG_WHITE,
-                     insertbackground=FG_WHITE, relief="flat", font=FONT_UI,
-                     highlightthickness=1, highlightbackground=BORDER,
-                     highlightcolor=ACCENT)
-        e.pack(fill="x", ipady=4)
-        return e
-
-    # ── Generation Tab ──────────────────────────────────────────────────
-
-    def _build_gen_tab(self, parent):
-        pad = dict(padx=12, pady=6)
-
-        scroll = tk.Frame(parent, bg=BG_DARK)
-        scroll.pack(fill="both", expand=True)
-        inner = tk.Frame(scroll, bg=BG_DARK)
-        inner.pack(fill="both", expand=True, **pad)
-
-        # Template selector
-        self._label(inner, "템플릿 선택").pack(anchor="w", pady=(0, 2))
-        self._tpl_var = tk.StringVar()
-        self._tpl_combo = ttk.Combobox(inner, textvariable=self._tpl_var,
-                                       state="readonly", font=FONT_UI)
-        self._tpl_combo.pack(fill="x")
-        self._tpl_combo.bind("<<ComboboxSelected>>", self._on_template_selected)
-
-        # Document type
-        self._label(inner, "문서 유형").pack(anchor="w", pady=(8, 2))
-        self._dtype_var = tk.StringVar(value="보고서")
-        from ai_generator import DOC_TYPE_PROMPTS
-        doc_types = list(DOC_TYPE_PROMPTS.keys())
-        self._dtype_combo = ttk.Combobox(inner, textvariable=self._dtype_var,
-                                         values=doc_types, state="readonly", font=FONT_UI)
-        self._dtype_combo.pack(fill="x")
-
-        # Input type
-        self._label(inner, "입력 방식").pack(anchor="w", pady=(8, 2))
-        self._itype_var = tk.StringVar(value="keywords")
-        itype_frame = tk.Frame(inner, bg=BG_DARK)
-        itype_frame.pack(fill="x")
-        for val, lbl in [("keywords", "키워드"), ("data", "데이터/정보"), ("text", "기존 텍스트")]:
-            rb = tk.Radiobutton(itype_frame, text=lbl, variable=self._itype_var,
-                                value=val, bg=BG_DARK, fg=FG_WHITE,
-                                selectcolor=BG_INPUT, activebackground=BG_DARK,
-                                activeforeground=ACCENT, font=FONT_UI)
-            rb.pack(side="left", padx=(0, 10))
-
-        # Input area
-        self._label(inner, "입력 내용").pack(anchor="w", pady=(8, 2))
-        self._input_text = scrolledtext.ScrolledText(
-            inner, height=7, bg=BG_INPUT, fg=FG_WHITE,
-            insertbackground=FG_WHITE, relief="flat", font=FONT_MONO,
-            wrap="word", highlightthickness=1,
-            highlightbackground=BORDER, highlightcolor=ACCENT)
-        self._input_text.pack(fill="both", expand=True)
-        self._input_text.insert("1.0", "예) 2024년 하반기 매출 분석, 전년 대비 15% 증가, 온라인 채널 확대")
-
-        # Extra instructions
-        self._label(inner, "추가 지시사항 (선택)").pack(anchor="w", pady=(6, 2))
-        self._extra_var = tk.StringVar()
-        tk.Entry(inner, textvariable=self._extra_var, bg=BG_INPUT, fg=FG_WHITE,
-                 insertbackground=FG_WHITE, relief="flat", font=FONT_UI,
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(fill="x", ipady=4)
-
-        # Buttons
-        btn_row = tk.Frame(inner, bg=BG_DARK)
-        btn_row.pack(fill="x", pady=(10, 0))
-        self._gen_btn = styled_button(btn_row, "✦ AI 생성", self._on_generate, accent=True)
-        self._gen_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        styled_button(btn_row, "지우기", self._clear_output, width=8).pack(side="left")
-
-        # Field values panel (shown when template has fields)
-        self._fields_frame = tk.LabelFrame(inner, text=" 템플릿 필드값 ",
-                                           bg=BG_DARK, fg=ACCENT, font=FONT_SM,
-                                           bd=1, relief="solid")
-        self._field_entries: dict[str, tk.StringVar] = {}
-
-    # ── Template Tab ───────────────────────────────────────────────────
-
-    def _build_template_tab(self, parent):
-        pad = dict(padx=12, pady=6)
-        inner = tk.Frame(parent, bg=BG_DARK)
-        inner.pack(fill="both", expand=True, **pad)
-
-        self._label(inner, "템플릿 목록").pack(anchor="w")
-        list_frame = tk.Frame(inner, bg=BG_DARK)
-        list_frame.pack(fill="both", expand=True, pady=(4, 0))
-
-        scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side="right", fill="y")
-        self._tpl_listbox = tk.Listbox(list_frame, bg=BG_INPUT, fg=FG_WHITE,
-                                        selectbackground=ACCENT, selectforeground=BG_DARK,
-                                        font=FONT_UI, relief="flat", activestyle="none",
-                                        yscrollcommand=scrollbar.set)
-        self._tpl_listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self._tpl_listbox.yview)
-        self._tpl_listbox.bind("<<ListboxSelect>>", self._on_tpl_list_select)
-
-        # Preview
-        self._label(inner, "미리보기").pack(anchor="w", pady=(8, 2))
-        self._tpl_preview = scrolledtext.ScrolledText(
-            inner, height=8, bg=BG_PANEL, fg=FG_WHITE, relief="flat",
-            font=FONT_MONO, wrap="word", state="disabled")
-        self._tpl_preview.pack(fill="both", expand=True)
-
-        # Buttons
-        btn_row = tk.Frame(inner, bg=BG_DARK)
-        btn_row.pack(fill="x", pady=(8, 0))
-        styled_button(btn_row, "새 템플릿", self._new_template, accent=True).pack(side="left", padx=(0, 4))
-        styled_button(btn_row, "HWP 가져오기", self._import_hwp).pack(side="left", padx=(0, 4))
-        styled_button(btn_row, "삭제", self._delete_template, danger=True).pack(side="right")
-
-    # ── Config Tab ─────────────────────────────────────────────────────
-
-    def _build_config_tab(self, parent):
-        from ai_generator import CLAUDE_MODELS, GEMINI_MODELS
-        inner = tk.Frame(parent, bg=BG_DARK)
-        inner.pack(fill="both", expand=True, padx=12, pady=12)
-
-        # ── Provider selector ──
-        self._label(inner, "AI 제공자").pack(anchor="w")
-        self._provider_var = tk.StringVar(value="claude")
-        prov_row = tk.Frame(inner, bg=BG_DARK)
-        prov_row.pack(fill="x", pady=(2, 8))
-        for val, lbl in [("claude", "Claude"), ("gemini", "Gemini"), ("openrouter", "OpenRouter")]:
-            rb = tk.Radiobutton(prov_row, text=lbl, variable=self._provider_var,
-                                value=val, bg=BG_DARK, fg=FG_WHITE,
-                                selectcolor=BG_INPUT, activebackground=BG_DARK,
-                                activeforeground=ACCENT, font=FONT_UI,
-                                command=self._on_provider_change)
-            rb.pack(side="left", padx=(0, 12))
-
-        # ── Claude section ──
-        self._claude_frame = tk.Frame(inner, bg=BG_DARK)
-        self._claude_frame.pack(fill="x")
-
-        self._label(self._claude_frame, "Anthropic API Key").pack(anchor="w")
-        self._apikey_var = tk.StringVar(value=os.environ.get("ANTHROPIC_API_KEY", ""))
-        tk.Entry(self._claude_frame, textvariable=self._apikey_var, bg=BG_INPUT, fg=FG_WHITE,
-                 insertbackground=FG_WHITE, relief="flat", font=FONT_MONO, show="*",
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(fill="x", ipady=4, pady=(2, 6))
-
-        # ── Gemini section ──
-        self._gemini_frame = tk.Frame(inner, bg=BG_DARK)
-        # (shown when Gemini selected)
-
-        self._label(self._gemini_frame, "Google Gemini API Key").pack(anchor="w")
-        self._gemini_key_var = tk.StringVar(value=os.environ.get("GEMINI_API_KEY", ""))
-        tk.Entry(self._gemini_frame, textvariable=self._gemini_key_var, bg=BG_INPUT, fg=FG_WHITE,
-                 insertbackground=FG_WHITE, relief="flat", font=FONT_MONO, show="*",
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(fill="x", ipady=4, pady=(2, 6))
-
-        # ── OpenRouter section ──
-        self._openrouter_frame = tk.Frame(inner, bg=BG_DARK)
-        # (shown when OpenRouter selected)
-
-        self._label(self._openrouter_frame, "OpenRouter API Key").pack(anchor="w")
-        self._openrouter_key_var = tk.StringVar(value=os.environ.get("OPENROUTER_API_KEY", ""))
-        tk.Entry(self._openrouter_frame, textvariable=self._openrouter_key_var, bg=BG_INPUT, fg=FG_WHITE,
-                 insertbackground=FG_WHITE, relief="flat", font=FONT_MONO, show="*",
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(fill="x", ipady=4, pady=(2, 2))
-        tk.Label(self._openrouter_frame, text="openrouter.ai 에서 키 발급",
-                 bg=BG_DARK, fg=FG_MUTED, font=FONT_SM).pack(anchor="w", pady=(0, 6))
-
-        # ── Model selector (shared, values change by provider) ──
-        self._label(inner, "모델").pack(anchor="w", pady=(6, 2))
-        self._model_var = tk.StringVar(value=CLAUDE_MODELS[0][0])
-        self._model_combo = ttk.Combobox(inner, textvariable=self._model_var,
-                                         state="readonly", font=FONT_UI)
-        self._model_combo.pack(fill="x")
-        self._update_model_list()  # populate with claude models initially
-
-        styled_button(inner, "설정 저장", self._save_api_key, accent=True).pack(anchor="w", pady=(10, 0))
-
-        sep = tk.Frame(inner, bg=BORDER, height=1)
-        sep.pack(fill="x", pady=12)
-
-        # ── HWP section ──
-        self._label(inner, "HWP COM 연결 (한글 프로그램 필요)").pack(anchor="w")
-        self._hwp_status_var = tk.StringVar(value="미연결")
-        tk.Label(inner, textvariable=self._hwp_status_var, bg=BG_DARK,
-                 fg=WARN, font=FONT_SM).pack(anchor="w", pady=2)
-        styled_button(inner, "HWP 연결 테스트", self._test_hwp_connection).pack(anchor="w", pady=4)
-
-        info = (
-            "HWP COM 없이도 텍스트 기반 생성이 가능합니다.\n"
-            "HWP COM 연결 시 원본 서식을 유지한 문서 편집이 가능합니다."
-        )
-        tk.Label(inner, text=info, bg=BG_DARK, fg=FG_MUTED, font=FONT_SM,
-                 justify="left", wraplength=320).pack(anchor="w")
-
-    def _on_provider_change(self):
-        self._provider = self._provider_var.get()
-        self._gen = None
-        self._update_model_list()
-        self._claude_frame.pack_forget()
-        self._gemini_frame.pack_forget()
-        self._openrouter_frame.pack_forget()
-        if self._provider == "gemini":
-            self._gemini_frame.pack(fill="x")
-        elif self._provider == "openrouter":
-            self._openrouter_frame.pack(fill="x")
-        else:
-            self._claude_frame.pack(fill="x")
-
-    def _update_model_list(self):
-        from ai_generator import CLAUDE_MODELS, GEMINI_MODELS, OPENROUTER_MODELS
-        provider = self._provider_var.get()
-        if provider == "gemini":
-            models = GEMINI_MODELS
-        elif provider == "openrouter":
-            models = OPENROUTER_MODELS
-        else:
-            models = CLAUDE_MODELS
-        values = [m[0] for m in models]
-        labels = [m[1] for m in models]
-        self._model_combo["values"] = labels
-        self._model_combo.current(0)
-        self._model_var.set(values[0])
-        self._model_values = values
-        self._model_combo.bind("<<ComboboxSelected>>", self._on_model_select)
-
-    def _on_model_select(self, _event=None):
-        idx = self._model_combo.current()
-        if 0 <= idx < len(self._model_values):
-            self._model_var.set(self._model_values[idx])
-            self._gen = None
-
-    # ── Right panel (output) ─────────────────────────────────────────
-
-    def _build_right(self, parent):
-        top = tk.Frame(parent, bg=BG_DARK)
-        top.pack(fill="x", padx=8, pady=(4, 0))
-        tk.Label(top, text="생성 결과", bg=BG_DARK, fg=ACCENT,
-                 font=FONT_BIG).pack(side="left")
-
-        btn_row = tk.Frame(top, bg=BG_DARK)
-        btn_row.pack(side="right")
-        styled_button(btn_row, "텍스트 저장", self._save_txt).pack(side="left", padx=(0, 4))
-        styled_button(btn_row, "HWP로 저장", self._save_hwp, accent=True).pack(side="left", padx=(0, 4))
-        styled_button(btn_row, "클립보드 복사", self._copy_clipboard).pack(side="left")
-
-        self._output_text = scrolledtext.ScrolledText(
-            parent, bg=BG_PANEL, fg=FG_WHITE, insertbackground=FG_WHITE,
-            relief="flat", font=FONT_MONO, wrap="word",
-            highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
-        self._output_text.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # Progress bar
-        self._progress = ttk.Progressbar(parent, mode="indeterminate")
-        self._progress.pack(fill="x", padx=8, pady=(0, 4))
-
-    # ── Template management ─────────────────────────────────────────
-
-    def _load_templates(self):
-        self._templates = self.tmgr.list_templates()
-        names = [f"{'[내장] ' if t['builtin'] else ''}{t['name']} ({t['doc_type']})"
-                 for t in self._templates]
-        self._tpl_combo["values"] = ["(템플릿 없이 생성)"] + names
-        self._tpl_combo.current(0)
-
-        self._tpl_listbox.delete(0, "end")
-        for t in self._templates:
-            prefix = "📌 " if t["builtin"] else "📄 "
-            self._tpl_listbox.insert("end", f"{prefix}{t['name']}  [{t['doc_type']}]")
-
-    def _on_template_selected(self, _event=None):
-        idx = self._tpl_combo.current() - 1  # -1 for "(없이 생성)"
-        if idx < 0:
-            self._hide_fields()
-            return
-        tpl = self._templates[idx]
-        try:
-            full = self.tmgr.get_template(tpl["id"])
-            self._dtype_var.set(full["doc_type"])
-            if full.get("fields"):
-                self._show_fields(full["fields"])
-            else:
-                self._hide_fields()
-        except Exception as e:
-            messagebox.showerror("오류", str(e))
-
-    def _on_tpl_list_select(self, _event=None):
-        sel = self._tpl_listbox.curselection()
-        if not sel:
-            return
-        tpl = self._templates[sel[0]]
-        try:
-            full = self.tmgr.get_template(tpl["id"])
-            content = full.get("content", "")
-            self._tpl_preview.config(state="normal")
-            self._tpl_preview.delete("1.0", "end")
-            self._tpl_preview.insert("1.0", content)
-            self._tpl_preview.config(state="disabled")
-        except Exception:
-            pass
-
-    def _show_fields(self, fields: list[str]):
-        self._fields_frame.pack(fill="x", padx=12, pady=(6, 0))
-        # Clear old widgets
-        for w in self._fields_frame.winfo_children():
-            w.destroy()
-        self._field_entries.clear()
-        for f in fields:
-            row = tk.Frame(self._fields_frame, bg=BG_DARK)
-            row.pack(fill="x", padx=6, pady=2)
-            tk.Label(row, text=f"{{{{{f}}}}}", bg=BG_DARK, fg=ACCENT,
-                     font=FONT_SM, width=14, anchor="w").pack(side="left")
-            var = tk.StringVar()
-            tk.Entry(row, textvariable=var, bg=BG_INPUT, fg=FG_WHITE,
-                     insertbackground=FG_WHITE, relief="flat", font=FONT_UI,
-                     highlightthickness=1, highlightbackground=BORDER).pack(
-                         side="left", fill="x", expand=True, ipady=3)
-            self._field_entries[f] = var
-
-    def _hide_fields(self):
-        self._fields_frame.pack_forget()
-        self._field_entries.clear()
-
-    def _new_template(self):
-        NewTemplateDialog(self, self.tmgr, self._load_templates)
-
-    def _import_hwp(self):
-        path = filedialog.askopenfilename(
-            title="HWP 파일 선택",
-            filetypes=[("HWP 파일", "*.hwp"), ("모든 파일", "*.*")])
-        if not path:
-            return
-        name = Path(path).stem
-        try:
-            self.tmgr.import_hwp_template(path)
-            self._load_templates()
-            messagebox.showinfo("완료", f"'{name}' 템플릿을 가져왔습니다.")
-        except Exception as e:
-            messagebox.showerror("가져오기 실패", str(e))
-
-    def _delete_template(self):
-        sel = self._tpl_listbox.curselection()
-        if not sel:
-            messagebox.showwarning("선택 없음", "삭제할 템플릿을 선택하세요.")
-            return
-        tpl = self._templates[sel[0]]
-        if tpl["builtin"]:
-            messagebox.showinfo("삭제 불가", "내장 템플릿은 삭제할 수 없습니다.")
-            return
-        if messagebox.askyesno("확인", f"'{tpl['name']}' 템플릿을 삭제하시겠습니까?"):
-            self.tmgr.delete_template(tpl["id"])
-            self._load_templates()
-
-    # ── Generation ─────────────────────────────────────────────────
-
-    def _on_generate(self):
-        input_data = self._input_text.get("1.0", "end").strip()
-        if not input_data:
-            messagebox.showwarning("입력 필요", "생성할 내용을 입력해주세요.")
-            return
-
-        # Check API key
-        if self._provider == "gemini":
-            if not os.environ.get("GEMINI_API_KEY") and not self._gemini_key_var.get().strip():
-                messagebox.showerror("API Key 필요", "설정 탭에서 Gemini API Key를 입력해주세요.")
-                return
-        elif self._provider == "openrouter":
-            if not os.environ.get("OPENROUTER_API_KEY") and not self._openrouter_key_var.get().strip():
-                messagebox.showerror("API Key 필요", "설정 탭에서 OpenRouter API Key를 입력해주세요.")
-                return
-        else:
-            if not os.environ.get("ANTHROPIC_API_KEY") and not self._apikey_var.get().strip():
-                messagebox.showerror("API Key 필요", "설정 탭에서 Anthropic API Key를 입력해주세요.")
-                return
-
-        self._gen_btn.config(state="disabled")
-        self._progress.start(10)
-        self._set_status("AI 생성 중...")
-        self._output_text.delete("1.0", "end")
-
-        # Gather params
-        idx = self._tpl_combo.current() - 1
-        tpl = self._templates[idx] if idx >= 0 else None
-        doc_type = self._dtype_var.get()
-        input_type = self._itype_var.get()
-        extra = self._extra_var.get()
-        field_vals = {k: v.get() for k, v in self._field_entries.items()}
-
-        def run():
+        self.s = cfg.load()
+        # API 키가 없으면, 설치된 Claude Code / Codex를 기본으로 고른다
+        if self.s["provider"] not in CLI_PROVIDERS and not self.s["api_keys"].get(self.s["provider"]):
+            import llm
+            for p in CLI_PROVIDERS:
+                if llm.find_cli(p):
+                    self.s["provider"] = p
+                    break
+        self.title(f"{APP_NAME} {APP_NAME_EN}")
+        icon = cfg.resource_dir() / "assets" / "icon.ico"
+        if icon.exists():
             try:
-                template_text = ""
-                if tpl:
-                    full = self.tmgr.get_template(tpl["id"])
-                    template_content = full.get("content", "")
-                    # If fields exist, fill them
-                    if full.get("fields") and any(field_vals.values()):
-                        template_text = self.tmgr.apply_fields(template_content, field_vals)
-                    else:
-                        template_text = template_content
+                self.iconbitmap(default=str(icon))
+            except tk.TclError:
+                pass
+        self.geometry(self.s.get("window_geometry", "1280x820"))
+        self.minsize(1000, 720)
+        self.configure(bg=BG)
 
-                def on_chunk(text):
-                    self.after(0, self._append_output, text)
+        self._forms: list[dict] = []
+        self._extra_forms: list[dict] = []
+        self._refs: list[str] = []
+        self._result_path: str | None = None
+        self._saved_path: str | None = None
+        self._busy = False
+        self._save_job = None
 
-                result = self.gen.generate_streaming(
-                    doc_type=doc_type,
-                    input_type=input_type,
-                    input_data=input_data,
-                    template_text=template_text,
-                    extra_instructions=extra,
-                    on_chunk=on_chunk,
-                )
-                self.after(0, self._on_gen_done, result)
-            except Exception as e:
-                self.after(0, self._on_gen_error, self._friendly_error(str(e)))
+        from preview import Renderer
+        self.renderer = Renderer()
 
-        threading.Thread(target=run, daemon=True).start()
+        self._style()
+        self._build()
+        import ime_font
+        ime_font.install(self)
+        self.reload_forms()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _append_output(self, text: str):
-        self._output_text.insert("end", text)
-        self._output_text.see("end")
+    # ── 공통 ──
+    def _style(self):
+        # 한글 조합 중 글자는 Tk 기본 글꼴로 그려지므로, 기본 글꼴을 모두 같은 글꼴·크기로 맞춰
+        # 입력할 때 글씨가 커졌다 작아졌다 하지 않게 한다
+        import tkinter.font as tkfont
+        for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont",
+                     "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont"):
+            try:
+                tkfont.nametofont(name).configure(family=FONT[0], size=FONT[1])
+            except tk.TclError:
+                pass
+        st = ttk.Style(self)
+        st.theme_use("clam")
+        # 탭의 점선 포커스 테두리 제거 (Notebook.focus 요소를 뺀 레이아웃)
+        st.layout("TNotebook.Tab", [
+            ("Notebook.tab", {"sticky": "nswe", "children": [
+                ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                    ("Notebook.label", {"side": "top", "sticky": ""})]})]})])
+        st.configure(".", background=BG, foreground=TEXT, font=FONT)
+        st.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(12, 8, 12, 0))
+        st.configure("TNotebook.Tab", background=SOFT, foreground=MUTED, padding=(18, 6),
+                     font=FONT, borderwidth=0)
+        # clam 테마는 선택 탭의 여백을 줄이므로, 반대로 선택 탭을 키운다
+        st.map("TNotebook.Tab",
+               background=[("selected", CARD)],
+               foreground=[("selected", ACCENT)],
+               padding=[("selected", (26, 10))],
+               font=[("selected", ("Malgun Gothic", 11, "bold"))],
+               expand=[("selected", (2, 4, 2, 0))])
+        st.configure("TCombobox", fieldbackground=CARD, background=CARD, bordercolor=BORDER,
+                     arrowcolor=TEXT, padding=4)
+        st.map("TCombobox", fieldbackground=[("readonly", CARD)])
+        st.configure("TCheckbutton", background=CARD)
+        st.configure("TRadiobutton", background=CARD)
+        # 라디오 버튼·체크 상자의 점선 포커스 테두리 제거
+        for kind in ("Radiobutton", "Checkbutton"):
+            st.layout(f"T{kind}", [
+                (f"{kind}.padding", {"sticky": "nswe", "children": [
+                    (f"{kind}.indicator", {"side": "left", "sticky": ""}),
+                    (f"{kind}.label", {"side": "left", "sticky": "nswe"})]})])
+        st.configure("TSpinbox", fieldbackground=CARD, bordercolor=BORDER, padding=3)
+        st.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=SOFT, borderwidth=0)
+        self.option_add("*TCombobox*Listbox.font", FONT)
 
-    def _on_gen_done(self, result: str):
-        self._progress.stop()
-        self._gen_btn.config(state="normal")
-        labels = {"gemini": "Gemini", "openrouter": "OpenRouter"}
-        provider_lbl = labels.get(self._provider, "Claude")
-        self._set_status(f"[{provider_lbl}] 생성 완료 ({len(result)}자)")
+    def _build(self):
+        hdr = tk.Frame(self, bg=HEADER, height=52)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=APP_NAME, bg=HEADER, fg="#ffffff",
+                 font=("Malgun Gothic", 16, "bold")).pack(side="left", padx=(20, 4), pady=10)
+        tk.Label(hdr, text=APP_NAME_EN, bg=HEADER, fg="#ffffff",
+                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=(0, 12), pady=(12, 8))
+        self._status = tk.StringVar(value="준비")
+        tk.Label(hdr, textvariable=self._status, bg=HEADER, fg="#d6e4ff", font=FONT).pack(side="right", padx=20)
+        self._progress = ttk.Progressbar(self, mode="indeterminate", style="Horizontal.TProgressbar")
+
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True)
+        self.tab_gen = tk.Frame(self.nb, bg=BG)
+        self.tab_tpl = tk.Frame(self.nb, bg=BG)
+        self.tab_cfg = tk.Frame(self.nb, bg=BG)
+        self.nb.add(self.tab_gen, text="문서 생성")
+        self.nb.add(self.tab_tpl, text="템플릿")
+        self.nb.add(self.tab_cfg, text="설정")
+        self._build_gen()
+        self._build_tpl()
+        self._build_cfg()
+
+    def status(self, msg):
+        self._status.set(msg)
+
+    def card(self, parent, title=None):
+        f = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        if title:
+            tk.Label(f, text=title, bg=CARD, fg=TEXT, font=FONT_B).pack(anchor="w", padx=14, pady=(10, 4))
+        return f
+
+    # ── 양식 목록 ──
+    def reload_forms(self):
+        forms = []
+        for p in sorted(BUILTIN_FORMS_DIR.glob("*.hwpx")):
+            forms.append({"path": str(p), "name": display_name(p), "builtin": True, "kind": "hwpx"})
+        udir = Path(self.s["user_forms_dir"])
+        if udir.exists():
+            for p in sorted(list(udir.glob("*.hwpx")) + list(udir.glob("*.pdf"))):
+                forms.append({"path": str(p), "name": display_name(p), "builtin": False,
+                              "kind": p.suffix.lower()[1:]})
+        self._forms = forms
+        self._refresh_form_combo()
+        self._refresh_tpl_list()
+
+    def _all_gen_forms(self):
+        return self._forms + self._extra_forms
 
     @staticmethod
-    def _friendly_error(raw: str) -> str:
-        """Convert raw API error strings into readable Korean messages."""
-        r = raw.lower()
-        # Gemini quota
-        if "resource_exhausted" in r or "quota exceeded" in r:
-            return (
-                "Gemini API 할당량 초과 (429)\n\n"
-                "무료 티어 한도에 도달했습니다.\n\n"
-                "해결 방법:\n"
-                "  1. 잠시 후 다시 시도 (약 1분 대기)\n"
-                "  2. 설정에서 Claude로 전환\n"
-                "  3. Google AI Studio에서 결제 설정 후 유료 티어 사용\n"
-                "     → https://aistudio.google.com"
-            )
-        # Gemini auth
-        if "api_key_invalid" in r or "api key not valid" in r:
-            return "Gemini API Key가 유효하지 않습니다.\n설정 탭에서 올바른 키를 입력해주세요."
-        # Anthropic auth
-        if "authentication_error" in r or "invalid x-api-key" in r:
-            return "Claude API Key가 유효하지 않습니다.\n설정 탭에서 올바른 키를 입력해주세요."
-        # Anthropic overload
-        if "overloaded" in r:
-            return "Claude 서버가 일시적으로 과부하 상태입니다.\n잠시 후 다시 시도해주세요."
-        # Generic rate limit
-        if "rate limit" in r or "too many requests" in r or "429" in r:
-            return "요청 한도 초과 (429)\n잠시 후 다시 시도해주세요."
-        # Connection error
-        if "connection" in r or "timeout" in r:
-            return "네트워크 연결 오류\n인터넷 연결을 확인하고 다시 시도해주세요."
-        # OpenRouter insufficient credits
-        if "credit balance" in r or "insufficient credits" in r or "402" in r:
-            return (
-                "OpenRouter 크레딧이 부족합니다.\n\n"
-                "해결 방법:\n"
-                "  1. openrouter.ai 에서 크레딧 충전\n"
-                "  2. 무료 모델(예: Llama)로 변경"
-            )
-        # Generic auth error (covers OpenRouter 401)
-        if "no auth" in r or "unauthorized" in r:
-            return "API Key가 유효하지 않습니다.\n설정 탭에서 올바른 키를 입력해주세요."
-        # Fallback: show first 300 chars only
-        return raw[:300] + ("..." if len(raw) > 300 else "")
+    def _form_label(f):
+        tag = "기본" if f["builtin"] else ("PDF" if f["kind"] == "pdf" else "내 양식")
+        return f"[{tag}] {f['name']}"
 
-    def _on_gen_error(self, error: str):
-        self._progress.stop()
-        self._gen_btn.config(state="normal")
-        self._set_status("오류 발생")
-        messagebox.showerror("생성 오류", error)
+    def _refresh_form_combo(self):
+        labels = [FREE_FORM] + [self._form_label(f) for f in self._all_gen_forms()]
+        cur = self._form_var.get()
+        self._form_combo["values"] = labels
+        self._form_var.set(cur if cur in labels else (labels[1] if len(labels) > 1 else FREE_FORM))
+        self._on_form_change()
 
-    def _clear_output(self):
-        self._output_text.delete("1.0", "end")
-        self._set_status("준비")
+    def _selected_form(self):
+        label = self._form_var.get()
+        for f in self._all_gen_forms():
+            if self._form_label(f) == label:
+                return f
+        return None
 
-    # ── Save / Export ──────────────────────────────────────────────
+    def base_style_path(self) -> str:
+        p = BUILTIN_FORMS_DIR / self.s.get("base_style_form", "")
+        if p.exists():
+            return str(p)
+        return str(sorted(BUILTIN_FORMS_DIR.glob("*.hwpx"))[0])
 
-    def _get_output(self) -> str:
-        return self._output_text.get("1.0", "end").strip()
+    # ══ 문서 생성 탭 ═══════════════════════════════════════════════════════
+    def _build_gen(self):
+        pw = tk.PanedWindow(self.tab_gen, orient="horizontal", bg=BG, sashwidth=6, bd=0)
+        pw.pack(fill="both", expand=True, padx=12, pady=12)
+        left = tk.Frame(pw, bg=BG)
+        right = tk.Frame(pw, bg=BG)
+        chat = tk.Frame(pw, bg=BG)
+        # 창을 키우면 미리보기만 넓어지고 양옆 패널은 그대로 둔다
+        pw.add(left, minsize=320, width=360, stretch="never")
+        pw.add(right, minsize=420, stretch="always")
+        pw.add(chat, minsize=280, width=330, stretch="never")
+        self._build_chat(chat)
 
-    def _save_txt(self):
-        text = self._get_output()
-        if not text:
-            messagebox.showwarning("내용 없음", "저장할 내용이 없습니다.")
+        # 양식
+        c1 = self.card(left, "1. 양식")
+        c1.pack(fill="x")
+        row = tk.Frame(c1, bg=CARD)
+        row.pack(fill="x", padx=14)
+        self._form_var = tk.StringVar()
+        self._form_combo = ttk.Combobox(row, textvariable=self._form_var, state="readonly", font=FONT)
+        self._form_combo.pack(side="left", fill="x", expand=True)
+        self._form_combo.bind("<<ComboboxSelected>>", lambda e: self._on_form_change())
+        button(row, "파일 열기…", self._open_form_file).pack(side="left", padx=(6, 0))
+        self._form_info = tk.StringVar(value="")
+        tk.Label(c1, textvariable=self._form_info, bg=CARD, fg=MUTED, font=FONT_SM,
+                 justify="left", wraplength=360).pack(anchor="w", padx=14, pady=(4, 10))
+
+        # 버튼과 참고 자료를 아래에 먼저 고정해야, 창이 작아질 때 요청 입력칸만 줄어든다
+        self._gen_btn = button(left, "문서 생성", self._on_generate, "primary")
+        self._gen_btn.configure(pady=10, font=("Malgun Gothic", 11, "bold"))
+        self._gen_btn.pack(side="bottom", fill="x", pady=(12, 0))
+        c3 = self.card(left, "3. 참고 자료 (선택)")
+        c3.pack(side="bottom", fill="x", pady=(10, 0))
+
+        # 요청
+        c2 = self.card(left, "2. 작성 요청")
+        c2.pack(fill="both", expand=True, pady=(10, 0))
+        tk.Label(c2, text="무엇을 쓸지 자유롭게 적어주세요. 날짜·장소·인원·예산 등 사실 정보가 많을수록 정확합니다.",
+                 bg=CARD, fg=MUTED, font=FONT_SM, wraplength=360, justify="left").pack(anchor="w", padx=14)
+        self._request = scrolledtext.ScrolledText(
+            c2, height=3, bg="#fbfcfe", fg=TEXT, insertbackground=TEXT, relief="flat",
+            font=FONT, wrap="word", highlightthickness=1, highlightbackground=BORDER,
+            highlightcolor=ACCENT, padx=8, pady=6)
+        self._request.pack(fill="both", expand=True, padx=14, pady=(6, 12))
+        self._request.insert("1.0", "예) 2025. 5. 23.(금) 본교 체육관에서 1학년 120명 대상 과학 탐구 축전을 운영함. "
+                                    "부스 6개, 예산 80만 원(재료비), 담당 과학정보부.")
+
+        # 참고 자료 (카드는 위에서 아래쪽에 고정해 둠)
+        tk.Label(c3, text="공문, 지난 계획서, 안내문 등 (PDF·HWPX·HWP·TXT)",
+                 bg=CARD, fg=MUTED, font=FONT_SM).pack(anchor="w", padx=14)
+        self._ref_list = tk.Listbox(c3, height=3, bg="#fbfcfe", fg=TEXT, relief="flat", font=FONT_SM,
+                                    highlightthickness=1, highlightbackground=BORDER,
+                                    selectbackground=SOFT, selectforeground=TEXT, activestyle="none")
+        self._ref_list.pack(fill="x", padx=14, pady=(6, 6))
+        rrow = tk.Frame(c3, bg=CARD)
+        rrow.pack(fill="x", padx=14, pady=(0, 12))
+        button(rrow, "추가…", self._add_ref).pack(side="left")
+        button(rrow, "선택 제거", self._remove_ref).pack(side="left", padx=6)
+
+        # 미리보기
+        self.gen_preview = PreviewPane(right, "생성 결과", self.s.get("preview_zoom", 100))
+        self.gen_preview.pack(fill="both", expand=True)
+        a = self.gen_preview.actions
+        self._btn_save = button(a, "다른 이름으로 저장…", self._save_as)
+        self._btn_open = button(a, "한글로 열기", self._open_result, "primary")
+        self._btn_folder = button(a, "폴더 열기", self._open_result_folder)
+        for b in (self._btn_folder, self._btn_save, self._btn_open):
+            b.pack(side="left", padx=(6, 0))
+            b.configure(state="disabled")
+        self.gen_preview.show_message("왼쪽에서 양식을 고르고 [문서 생성]을 누르세요.")
+
+    def _on_form_change(self):
+        f = self._selected_form()
+        if f is None:
+            self._form_info.set("양식 없이 요청 내용으로 문서를 구성합니다.\n"
+                                f"서식은 설정의 기본 서식({display_name(Path(self.base_style_path()))})을 사용합니다.")
             return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("텍스트 파일", "*.txt"), ("모든 파일", "*.*")])
-        if path:
-            Path(path).write_text(text, encoding="utf-8")
-            self._set_status(f"저장됨: {Path(path).name}")
-
-    def _save_hwp(self):
-        text = self._get_output()
-        if not text:
-            messagebox.showwarning("내용 없음", "저장할 내용이 없습니다.")
+        if f["kind"] == "pdf":
+            self._form_info.set("PDF 양식: 항목 구성을 읽어 같은 순서로 내용을 쓰고, 학교 기본 서식으로 .hwpx를 만듭니다.")
             return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".hwp",
-            filetypes=[("HWP 파일", "*.hwp"), ("모든 파일", "*.*")])
+        self._form_info.set("양식 분석 중…")
+
+        def run():
+            try:
+                from hwpx_form import HwpxDoc
+                d = HwpxDoc(f["path"])
+                d.analyze()
+                n_s = sum(1 for k in d.slots if k.startswith("S"))
+                msg = (f"빈칸 {n_s}개 · 반복 표 {len(d.tables)}개를 채웁니다. 서식은 원본 그대로 유지됩니다."
+                       if d.has_placeholders else
+                       f"○ 빈칸이 없는 완성 문서입니다. 문장 {n_s}개를 요청 주제에 맞게 다시 씁니다.")
+            except Exception as e:
+                msg = f"양식을 읽을 수 없습니다: {e}"
+            self.after(0, lambda: self._form_info.set(msg))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_form_file(self):
+        path = filedialog.askopenfilename(title="양식 파일 선택",
+                                          filetypes=[("양식", "*.hwpx *.pdf *.hwp"), ("모든 파일", "*.*")])
         if not path:
             return
+        if path.lower().endswith(".hwp"):
+            self._convert_hwp(path, lambda p: self._use_extra_form(p))
+            return
+        self._use_extra_form(path)
+
+    def _use_extra_form(self, path):
+        p = Path(path)
+        f = {"path": str(p), "name": p.stem, "builtin": False, "kind": p.suffix.lower()[1:]}
+        self._extra_forms = [x for x in self._extra_forms if x["path"] != f["path"]] + [f]
+        self._form_var.set(self._form_label(f))
+        self._refresh_form_combo()
+
+    def _add_ref(self):
+        paths = filedialog.askopenfilenames(
+            title="참고 자료 선택",
+            filetypes=[("문서", "*.pdf *.hwpx *.hwp *.txt *.md"), ("모든 파일", "*.*")])
+        for p in paths:
+            if p not in self._refs:
+                self._refs.append(p)
+                self._ref_list.insert("end", Path(p).name)
+
+    def _remove_ref(self):
+        for i in reversed(self._ref_list.curselection()):
+            self._ref_list.delete(i)
+            del self._refs[i]
+
+    def _ai_params(self):
+        p = self.s["provider"]
+        if p in CLI_PROVIDERS:
+            import llm
+            # CLI 방식은 api_key 자리에 실행 파일 경로를 넣는다
+            key = self.s.get("cli_paths", {}).get(p, "").strip() or llm.find_cli(p) or ""
+            model = self.s["models"].get(p, "").strip()
+        else:
+            key = self.s["api_keys"].get(p, "").strip()
+            model = self.s["models"].get(p) or DEFAULT_MODELS[p][0]
+        return {
+            "provider": p,
+            "api_key": key,
+            "model": model,
+            "max_tokens": int(self.s["max_tokens"]),
+            "temperature": float(self.s["temperature"]),
+            "ref_max_chars": int(self.s["ref_max_chars"]),
+            "timeout": int(self.s["request_timeout"]),
+            "send_images": bool(self.s.get("ai_sees_screen", True)),
+            "max_images": int(self.s.get("max_screen_pages", 6)),
+        }
+
+    def _check_ai(self, ai) -> bool:
+        if ai["api_key"]:
+            return True
+        name = ALL_PROVIDERS[ai["provider"]]
+        if ai["provider"] in CLI_PROVIDERS:
+            messagebox.showwarning("프로그램 없음", f"{name}를 찾을 수 없습니다.\n"
+                                                  "설정 탭의 안내대로 설치하거나 실행 파일 위치를 지정해 주세요.")
+        else:
+            messagebox.showwarning("API 키 필요", f"설정 탭에서 {name} API 키를 입력해주세요.")
+        self.nb.select(self.tab_cfg)
+        return False
+
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        self._gen_btn.configure(state="disabled" if busy else "normal",
+                                text="작성 중…" if busy else "문서 생성")
+        if busy:
+            self._progress.pack(fill="x", after=self.nb.master.winfo_children()[0])
+            self._progress.start(12)
+        else:
+            self._progress.stop()
+            self._progress.pack_forget()
+
+    def _on_generate(self):
+        if self._busy:
+            return
+        if self._save_job:
+            self.after_cancel(self._save_job)
+        self._save_settings()
+        ai = self._ai_params()
+        if not self._check_ai(ai):
+            return
+        form = self._selected_form()
+        request = self._request.get("1.0", "end").strip()
+        refs = list(self._refs)
+        info = {k: self.s.get(k, "") for k in ("school_name", "department", "author")}
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        out = str(CACHE_DIR / f"result_{datetime.datetime.now():%Y%m%d_%H%M%S}.hwpx")
+        base = self.base_style_path()
+        self._set_busy(True)
+        self.gen_preview.show_message("AI가 문서를 작성하고 있습니다…")
+
+        def st(m):
+            self.after(0, lambda: self.status(m))
 
         def run():
+            import generator
             try:
-                from hwp_controller import HwpController
-                hwp = HwpController()
-                hwp.connect()
-                hwp.new_document()
-                hwp.insert_text(text)
-                hwp.save_as(path, "HWP")
-                self.after(0, lambda: self._set_status(f"HWP 저장됨: {Path(path).name}"))
-                self.after(0, lambda: messagebox.showinfo("저장 완료",
-                    f"HWP 파일로 저장되었습니다:\n{path}"))
+                if form is None:
+                    meta = generator.build_document(base, out, request, refs, info, ai, on_status=st)
+                elif form["kind"] == "pdf":
+                    meta = generator.build_document(base, out, request, refs, info, ai,
+                                                    pdf_form=form["path"], on_status=st)
+                else:
+                    meta = generator.fill_form(form["path"], out, request, refs, info, ai, on_status=st)
+                self.after(0, lambda: self._on_generated(out, meta, form))
             except Exception as e:
-                err_msg = str(e)  # Python 3: except 블록 종료 시 e가 삭제되므로 미리 캡처
-                # 폴백 1: HWP COM 없이 HWPX 생성 (한글에서 열 수 있음)
-                hwpx_path = (path[:-4] if path.lower().endswith(".hwp") else path) + ".hwpx"
+                err = str(e)
+                self.after(0, lambda msg=err: self._on_gen_error(msg))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_gen_error(self, msg):
+        self._set_busy(False)
+        self.status("생성 실패")
+        self.gen_preview.show_message("생성에 실패했습니다.")
+        messagebox.showerror("생성 오류", msg[:800])
+
+    def _on_generated(self, out, meta, form):
+        self._set_busy(False)
+        self._result_path = out
+        self._saved_path = None
+        title = meta.get("title") or (form["name"] if form else "문서")
+        title = re.sub(r"^\s*[-\d.]*\s*", "", title)
+        self._result_title = title
+        for b in (self._btn_save, self._btn_open, self._btn_folder):
+            b.configure(state="normal")
+        if self.s.get("auto_save", True):
+            try:
+                self._saved_path = self._save_to(self._default_save_path(title))
+                self.status(f"저장됨: {self._saved_path}")
+            except OSError as e:
+                self.status(f"자동 저장 실패: {e}")
+        else:
+            self.status("생성 완료 — [다른 이름으로 저장]으로 저장하세요")
+        self.gen_preview.set_title(f"생성 결과 — {title}")
+        self._start_editing(out, "문서가 완성되었습니다. 고칠 부분이 있으면 말씀해주세요."
+                                 + ("\n수정하면 저장된 파일에도 바로 반영됩니다." if self._saved_path else ""))
+        if self.s.get("open_after_save") and self._saved_path:
+            os.startfile(self._saved_path)
+        self.preview_file(self.gen_preview, self._saved_path or out)
+
+    def _default_save_path(self, title):
+        pattern = self.s.get("filename_pattern") or "{title}_{date}"
+        name = pattern.format(title=title, date=f"{datetime.date.today():%Y%m%d}",
+                              time=f"{datetime.datetime.now():%H%M}")
+        folder = Path(self.s.get("output_dir") or Path.home())
+        folder.mkdir(parents=True, exist_ok=True)
+        p = folder / f"{safe_filename(name)}.hwpx"
+        i = 2
+        while p.exists():
+            p = folder / f"{safe_filename(name)} ({i}).hwpx"
+            i += 1
+        return p
+
+    def _save_to(self, path) -> str:
+        shutil.copyfile(self._result_path, path)
+        return str(path)
+
+    def _save_as(self):
+        if not self._result_path:
+            return
+        default = self._default_save_path(getattr(self, "_result_title", "문서"))
+        path = filedialog.asksaveasfilename(
+            initialdir=str(default.parent), initialfile=default.name, defaultextension=".hwpx",
+            filetypes=[("HWPX 문서", "*.hwpx")])
+        if path:
+            self._saved_path = self._save_to(path)
+            self.status(f"저장됨: {self._saved_path}")
+            if self.s.get("open_after_save"):
+                os.startfile(self._saved_path)
+
+    def _open_result(self):
+        target = self._saved_path or self._result_path
+        if target:
+            os.startfile(target)
+
+    def _open_result_folder(self):
+        target = self._saved_path or self._result_path
+        if target:
+            os.startfile(str(Path(target).parent))
+
+    # ── AI 수정 대화 ──
+    def _build_chat(self, parent):
+        c = self.card(parent)
+        c.pack(fill="both", expand=True)
+        tk.Label(c, text="AI에게 수정 요청", bg=CARD, fg=TEXT, font=FONT_B).pack(anchor="w", padx=12, pady=(10, 4))
+        top = tk.Frame(c, bg=CARD)
+        top.pack(fill="x", padx=12, pady=(0, 6))
+        button(top, "파일 열기…", self._open_for_edit).pack(side="left")
+        self._undo_btn = button(top, "되돌리기", self._undo_edit)
+        self._undo_btn.pack(side="left", padx=(6, 0))
+        self._undo_btn.configure(state="disabled")
+
+        # 입력부를 먼저 아래에 고정해야 대화창이 늘어나도 가려지지 않는다
+        row = tk.Frame(c, bg=CARD)
+        row.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+        tk.Label(row, text="Enter 보내기 · Shift+Enter 줄바꿈", bg=CARD, fg=MUTED, font=FONT_SM).pack(side="left")
+        self._send_btn = button(row, "보내기", self._send_chat, "primary")
+        self._send_btn.pack(side="right")
+        self._chat_in = tk.Text(c, height=3, bg=CARD, fg=TEXT, relief="flat", font=FONT, wrap="word",
+                                insertbackground=TEXT, highlightthickness=1, highlightbackground=BORDER,
+                                highlightcolor=ACCENT, padx=8, pady=6)
+        self._chat_in.pack(side="bottom", fill="x", padx=12, pady=(8, 4))
+        self._chat_in.bind("<Return>", self._on_chat_enter)
+
+        self._chat_log = tk.Text(c, bg="#fbfcfe", fg=TEXT, relief="flat", font=FONT, wrap="word",
+                                 highlightthickness=1, highlightbackground=BORDER, padx=10, pady=8,
+                                 cursor="arrow", spacing1=2, spacing3=6)
+        self._chat_log.pack(fill="both", expand=True, padx=12)
+        self._chat_log.tag_configure("me", background="#e3edff", lmargin1=40, lmargin2=40,
+                                     rmargin=4, spacing1=6)
+        self._chat_log.tag_configure("ai", background="#f1f3f6", lmargin1=4, lmargin2=4,
+                                     rmargin=40, spacing1=6)
+        self._chat_log.tag_configure("who", foreground=MUTED, font=FONT_SM)
+        self._chat_log.tag_configure("sys", foreground=MUTED, font=FONT_SM, justify="center", spacing1=6)
+        self._chat_log.configure(state="disabled")
+
+        self._versions: list[str] = []
+        self._history: list[tuple[str, str]] = []
+        self._chat_reset("문서를 생성하거나 [파일 열기]로 HWPX를 불러오면\n여기서 고칠 내용을 말로 요청할 수 있습니다.\n\n"
+                         "예) '운영 개요의 장소를 시청각실로 바꿔줘'\n"
+                         "    '추진 목적을 3개로 늘려줘'\n"
+                         "    '예산 표에 간식비 5만 원 추가하고 합계 고쳐줘'")
+
+    def _chat_add(self, who: str, text: str):
+        log = self._chat_log
+        log.configure(state="normal")
+        if who == "sys":
+            log.insert("end", text + "\n", "sys")
+        else:
+            log.insert("end", ("나" if who == "me" else "AI") + "\n", ("who", who))
+            log.insert("end", text.strip() + "\n", who)
+        log.configure(state="disabled")
+        log.see("end")
+
+    def _chat_reset(self, msg: str):
+        self._chat_log.configure(state="normal")
+        self._chat_log.delete("1.0", "end")
+        self._chat_log.configure(state="disabled")
+        self._history = []
+        self._chat_add("sys", msg)
+
+    def _on_chat_enter(self, e):
+        if e.state & 0x1:
+            return None
+        self._send_chat()
+        return "break"
+
+    def _start_editing(self, path: str, intro: str):
+        self._versions = [path]
+        self._undo_btn.configure(state="disabled")
+        self._chat_reset(intro)
+
+    def _open_for_edit(self):
+        path = filedialog.askopenfilename(title="수정할 문서", filetypes=[("HWPX 문서", "*.hwpx")])
+        if not path:
+            return
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        work = CACHE_DIR / f"edit_{datetime.datetime.now():%Y%m%d_%H%M%S}.hwpx"
+        shutil.copyfile(path, work)
+        self._result_path = str(work)
+        self._saved_path = None
+        self._result_title = Path(path).stem
+        for b in (self._btn_save, self._btn_open, self._btn_folder):
+            b.configure(state="normal")
+        self.gen_preview.set_title(f"편집 중 — {Path(path).name}")
+        self._start_editing(str(work), f"'{Path(path).name}'을(를) 불러왔습니다.\n"
+                                       "원본은 그대로 두고, 고친 결과는 [다른 이름으로 저장]으로 저장하세요.")
+        self.preview_file(self.gen_preview, str(work))
+
+    def _send_chat(self):
+        text = self._chat_in.get("1.0", "end").strip()
+        if not text or self._busy:
+            return
+        if not self._versions:
+            messagebox.showinfo("수정할 문서 없음", "먼저 문서를 생성하거나 [파일 열기]로 HWPX를 불러오세요.")
+            return
+        ai = self._ai_params()
+        if not self._check_ai(ai):
+            return
+        self._chat_in.delete("1.0", "end")
+        self._chat_add("me", text)
+        src = self._versions[-1]
+        out = str(CACHE_DIR / f"{Path(self._versions[0]).stem}_v{len(self._versions) + 1}.hwpx")
+        history = list(self._history)
+        self._history.append(("user", text))
+        self._set_busy(True)
+        self._send_btn.configure(state="disabled")
+
+        def st(m):
+            self.after(0, lambda: self.status(m))
+
+        def run():
+            import generator
+            try:
+                page_info = None
+                if self.s.get("ai_sees_screen", True):
+                    st("한글 화면 읽는 중…")
+                    page_info = self.renderer.page_info(src, int(self.s.get("preview_dpi", 96)))
+                res = generator.edit_document(src, out, text, history, ai, on_status=st,
+                                              page_info=page_info)
+                # 결과 확인: 고친 문서를 한글로 다시 열어 쪽 수를 센다
+                if page_info and page_info[1] and res.get("changed"):
+                    st("결과 확인 중…")
+                    _, after = self.renderer.page_info(out, int(self.s.get("preview_dpi", 96)))
+                    if after:
+                        res["pages"] = (page_info[1].get("pages"), after.get("pages"))
+                self.after(0, lambda: self._on_edited(out, res))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda msg=err: self._on_edit_error(msg))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_edit_error(self, msg):
+        self._set_busy(False)
+        self._send_btn.configure(state="normal")
+        self.status("수정 실패")
+        self._chat_add("sys", f"오류: {msg[:300]}")
+
+    def _on_edited(self, out, res):
+        self._set_busy(False)
+        self._send_btn.configure(state="normal")
+        reply = res.get("reply") or ("수정했습니다." if res["changed"] else "바꿀 부분을 찾지 못했습니다.")
+        self._history.append(("ai", reply))
+        self._chat_add("ai", reply)
+        if res.get("warning"):
+            self._chat_add("sys", "⚠ " + res["warning"])
+            self._history.append(("ai", "(프로그램 알림) " + res["warning"]))
+        if not res["changed"]:
+            self.status("변경 없음")
+            return
+        self._versions.append(out)
+        self._apply_version(out)
+        msg = f"{res['changed']}곳 수정 · 버전 {len(self._versions)}"
+        if res.get("pages"):
+            before, after = res["pages"]
+            msg += f" · 쪽 수 {before} → {after}"
+            self._history.append(("ai", f"(프로그램 알림) 수정 결과 문서는 {before}쪽에서 {after}쪽이 되었음"))
+        self._chat_add("sys", msg)
+
+    def _apply_version(self, path):
+        self._result_path = path
+        self._undo_btn.configure(state="normal" if len(self._versions) > 1 else "disabled")
+        if self._saved_path:
+            try:
+                shutil.copyfile(path, self._saved_path)
+                self.status(f"저장됨: {self._saved_path}")
+            except OSError as e:
+                self.status(f"저장 실패 (한글에서 파일을 열어두었나요?): {e}")
+        self.preview_file(self.gen_preview, path)
+
+    def _undo_edit(self):
+        if len(self._versions) <= 1 or self._busy:
+            return
+        self._versions.pop()
+        self._apply_version(self._versions[-1])
+        self._chat_add("sys", f"되돌림 · 버전 {len(self._versions)}")
+
+    # ── 미리보기 공통 ──
+    def preview_file(self, pane: PreviewPane, path: str):
+        if path.lower().endswith(".pdf"):
+            try:
+                from pdf_reader import extract_pdf_text
+                pane.show_text(extract_pdf_text(path)[:20000])
+            except Exception as e:
+                pane.show_message(f"PDF를 읽을 수 없습니다: {e}")
+            return
+        if not self.s.get("auto_preview", True):
+            pane.show_message("자동 미리보기가 꺼져 있습니다 (설정).")
+            return
+        pane.show_message("한글로 쪽 이미지를 만드는 중…")
+        pane._pending = path
+
+        def done(pages, err):
+            def apply():
+                if getattr(pane, "_pending", None) != path:
+                    return
+                if pages:
+                    pane.show_pages(pages, "(첫 쪽만 — 한글 미설치)" if err else "")
+                else:
+                    pane.show_message(err or "미리보기를 만들 수 없습니다.")
+            self.after(0, apply)
+        self.renderer.render(path, int(self.s.get("preview_dpi", 96)), done)
+
+    # ══ 템플릿 탭 ══════════════════════════════════════════════════════════
+    def _build_tpl(self):
+        pw = tk.PanedWindow(self.tab_tpl, orient="horizontal", bg=BG, sashwidth=6, bd=0)
+        pw.pack(fill="both", expand=True, padx=12, pady=12)
+        left = tk.Frame(pw, bg=BG)
+        right = tk.Frame(pw, bg=BG)
+        pw.add(left, minsize=280, width=320, stretch="never")
+        pw.add(right, minsize=480, stretch="always")
+
+        c = self.card(left, "양식 목록")
+        c.pack(fill="both", expand=True)
+        self._tpl_list = tk.Listbox(c, bg=CARD, fg=TEXT, relief="flat", font=FONT,
+                                    selectbackground=SOFT, selectforeground=ACCENT,
+                                    activestyle="none", highlightthickness=0, bd=0)
+        self._tpl_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._tpl_list.bind("<<ListboxSelect>>", lambda e: self._on_tpl_select())
+        self._tpl_list.bind("<Double-Button-1>", lambda e: self._use_tpl())
+        self._tpl_info = tk.StringVar(value="")
+        tk.Label(c, textvariable=self._tpl_info, bg=CARD, fg=MUTED, font=FONT_SM,
+                 justify="left", wraplength=280).pack(anchor="w", padx=14, pady=(0, 10))
+
+        btns = tk.Frame(left, bg=BG)
+        btns.pack(fill="x", pady=(10, 0))
+        button(btns, "이 양식으로 작성", self._use_tpl, "primary").pack(fill="x")
+        row = tk.Frame(btns, bg=BG)
+        row.pack(fill="x", pady=(6, 0))
+        button(row, "양식 추가…", self._add_tpl).pack(side="left", fill="x", expand=True)
+        button(row, "삭제", self._del_tpl, "danger").pack(side="left", padx=(6, 0))
+        button(btns, "내 양식 폴더 열기", self._open_forms_dir).pack(fill="x", pady=(6, 0))
+        tk.Label(btns, text="HWPX·HWP·PDF 양식을 추가할 수 있습니다.\n○○○○ 같은 빈칸이 있으면 그 자리만 채웁니다.",
+                 bg=BG, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", pady=(8, 0))
+
+        self.tpl_preview = PreviewPane(right, "미리보기", self.s.get("preview_zoom", 100))
+        self.tpl_preview.pack(fill="both", expand=True)
+
+    def _refresh_tpl_list(self):
+        if not hasattr(self, "_tpl_list"):
+            return
+        self._tpl_list.delete(0, "end")
+        for f in self._forms:
+            self._tpl_list.insert("end", "  " + self._form_label(f))
+
+    def _sel_tpl(self):
+        sel = self._tpl_list.curselection()
+        return self._forms[sel[0]] if sel else None
+
+    def _on_tpl_select(self):
+        f = self._sel_tpl()
+        if not f:
+            return
+        self.tpl_preview.set_title(f"미리보기 — {f['name']}")
+        info = "기본 제공 양식" if f["builtin"] else f"내 양식 · {Path(f['path']).name}"
+        self._tpl_info.set(info)
+        self.preview_file(self.tpl_preview, f["path"])
+
+    def _use_tpl(self):
+        f = self._sel_tpl()
+        if not f:
+            return
+        self._form_var.set(self._form_label(f))
+        self._on_form_change()
+        self.nb.select(self.tab_gen)
+
+    def _add_tpl(self):
+        paths = filedialog.askopenfilenames(title="양식 추가",
+                                            filetypes=[("양식", "*.hwpx *.hwp *.pdf"), ("모든 파일", "*.*")])
+        if not paths:
+            return
+        udir = Path(self.s["user_forms_dir"])
+        udir.mkdir(parents=True, exist_ok=True)
+        for p in paths:
+            if p.lower().endswith(".hwp"):
+                self._convert_hwp(p, lambda out: self.reload_forms(), udir)
+            else:
+                shutil.copy(p, udir / Path(p).name)
+        self.reload_forms()
+        self.status(f"양식 {len(paths)}개 추가됨")
+
+    def _convert_hwp(self, src, on_done, out_dir: Path | None = None):
+        out_dir = out_dir or CACHE_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = str(out_dir / (Path(src).stem + ".hwpx"))
+        self.status("HWP → HWPX 변환 중…")
+
+        def run():
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                import win32com.client
+                hwp = win32com.client.DispatchEx("HWPFrame.HwpObject")
+                import hwp_security
+                hwp_security.register(hwp)
                 try:
-                    from hwp_controller import HwpController
-                    HwpController.create_hwpx(hwpx_path, text)
-                    saved_name = Path(hwpx_path).name
-                    self.after(0, lambda: messagebox.showwarning(
-                        "HWPX로 저장",
-                        f"HWP COM을 사용할 수 없어 HWPX 형식으로 저장했습니다.\n"
-                        f"한글에서 열 수 있습니다.\n\n저장 위치: {hwpx_path}\n\n"
-                        f"원인: {err_msg}"
-                    ))
-                    self.after(0, lambda: self._set_status(f"HWPX 저장됨: {saved_name}"))
-                except Exception as e2:
-                    # 폴백 2: 최후 수단으로 텍스트 저장
-                    txt_path = (path[:-4] if path.lower().endswith(".hwp") else path) + "_내용.txt"
-                    Path(txt_path).write_text(text, encoding="utf-8")
-                    err2_msg = str(e2)
-                    self.after(0, lambda: messagebox.showerror(
-                        "저장 실패",
-                        f"HWP/HWPX 저장 모두 실패하여 텍스트로 저장했습니다.\n"
-                        f"저장 위치: {txt_path}\n\n원인: {err_msg}"
-                    ))
-                    self.after(0, lambda: self._set_status("텍스트로 저장됨"))
-
+                    hwp.XHwpWindows.Item(0).Visible = False
+                except Exception:
+                    pass
+                hwp.Open(os.path.abspath(src), "HWP", "forceopen:true")
+                hwp.SaveAs(out, "HWPX", "")
+                hwp.Clear(1)
+                hwp.Quit()
+                self.after(0, lambda: (self.status("변환 완료"), on_done(out)))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: messagebox.showerror(
+                    "변환 실패", f"HWP 파일을 HWPX로 바꾸려면 한글 프로그램이 필요합니다.\n\n{err}"))
+            finally:
+                pythoncom.CoUninitialize()
         threading.Thread(target=run, daemon=True).start()
 
-    def _copy_clipboard(self):
-        text = self._get_output()
-        if text:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self._set_status("클립보드에 복사됨")
+    def _del_tpl(self):
+        f = self._sel_tpl()
+        if not f:
+            return
+        if f["builtin"]:
+            messagebox.showinfo("삭제 불가", "기본 제공 양식은 삭제할 수 없습니다.")
+            return
+        if messagebox.askyesno("양식 삭제", f"'{f['name']}' 양식을 내 양식 폴더에서 삭제할까요?"):
+            Path(f["path"]).unlink(missing_ok=True)
+            self.reload_forms()
+            self.tpl_preview.show_message("미리볼 양식을 선택하세요.")
 
-    # ── Config actions ─────────────────────────────────────────────
+    def _open_forms_dir(self):
+        d = Path(self.s["user_forms_dir"])
+        d.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(d))
 
-    def _save_api_key(self):
-        claude_key = self._apikey_var.get().strip()
-        gemini_key = self._gemini_key_var.get().strip()
-        openrouter_key = self._openrouter_key_var.get().strip()
-        if claude_key:
-            os.environ["ANTHROPIC_API_KEY"] = claude_key
-        if gemini_key:
-            os.environ["GEMINI_API_KEY"] = gemini_key
-        if openrouter_key:
-            os.environ["OPENROUTER_API_KEY"] = openrouter_key
-        self._gen = None
-        self._set_status("설정 저장됨")
-        messagebox.showinfo("저장", "설정이 이 세션에 적용되었습니다.")
+    # ══ 설정 탭 ════════════════════════════════════════════════════════════
+    def _build_cfg(self):
+        outer = tk.Frame(self.tab_cfg, bg=BG)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=BG)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=min(e.width, 900)))
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120) * 3, "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        self._vars: dict[str, tk.Variable] = {}
 
-    def _test_hwp_connection(self):
+        # AI
+        c = self.card(inner, "AI 제공자")
+        c.pack(fill="x", padx=24, pady=(18, 0))
+        tk.Label(c, text="사용할 제공자를 고르세요. 키와 모델은 제공자마다 따로 저장됩니다.",
+                 bg=CARD, fg=MUTED, font=FONT_SM).pack(anchor="w", padx=14)
+        grid = tk.Frame(c, bg=CARD)
+        grid.pack(fill="x", padx=14, pady=(8, 12))
+        grid.columnconfigure(2, weight=1)
+        grid.columnconfigure(4, weight=1)
+        self._provider_var = tk.StringVar(value=self.s["provider"])
+        self._provider_var.trace_add("write", lambda *a: self._set("provider", self._provider_var.get()))
+        for col, head in enumerate(["사용", "제공자", "API 키", "", "모델", ""]):
+            tk.Label(grid, text=head, bg=CARD, fg=MUTED, font=FONT_SM).grid(row=0, column=col, sticky="w", padx=4)
+        self._model_combos = {}
+        for r, (pid, pname) in enumerate(PROVIDERS.items(), start=1):
+            ttk.Radiobutton(grid, variable=self._provider_var, value=pid).grid(row=r, column=0, padx=4, pady=4)
+            tk.Label(grid, text=pname, bg=CARD, fg=TEXT, font=FONT).grid(row=r, column=1, sticky="w", padx=4)
+            kv = tk.StringVar(value=self.s["api_keys"].get(pid, ""))
+            kv.trace_add("write", lambda *a, p=pid, v=kv: self._set_nested("api_keys", p, v.get().strip()))
+            ent = tk.Entry(grid, textvariable=kv, show="•", bg="#fbfcfe", fg=TEXT, relief="flat", font=FONT,
+                           highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+            ent.grid(row=r, column=2, sticky="ew", padx=4, ipady=4)
+            tk.Button(grid, text="보기", bg=CARD, fg=MUTED, relief="flat", font=FONT_SM, cursor="hand2",
+                      command=lambda e=ent: e.configure(show="" if e.cget("show") else "•")
+                      ).grid(row=r, column=3, padx=2)
+            mv = tk.StringVar(value=self.s["models"].get(pid) or DEFAULT_MODELS[pid][0])
+            mv.trace_add("write", lambda *a, p=pid, v=mv: self._set_nested("models", p, v.get().strip()))
+            cb = ttk.Combobox(grid, textvariable=mv, font=FONT,
+                              values=self.s.get("model_lists", {}).get(pid) or DEFAULT_MODELS[pid])
+            cb.grid(row=r, column=4, sticky="ew", padx=4)
+            self._model_combos[pid] = cb
+            button(grid, "목록 갱신", lambda p=pid: self._refresh_models(p)).grid(row=r, column=5, padx=4)
+
+        # API 키 없이: Claude Code / Codex
+        self._build_cli_card(inner)
+
+        # 기본 정보
+        c = self.card(inner, "기본 정보 (문서에 자동 반영)")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        self._entry(c, "학교(기관)명", "school_name")
+        self._entry(c, "작성 부서", "department", "예) 과학정보부")
+        self._entry(c, "작성자", "author", "예) 교사 홍길동", last=True)
+
+        # 저장
+        c = self.card(inner, "저장")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        self._entry(c, "저장 폴더", "output_dir", browse="dir")
+        self._entry(c, "파일 이름 규칙", "filename_pattern", "{title}=제목, {date}=날짜, {time}=시각")
+        self._check(c, "생성하면 저장 폴더에 자동 저장", "auto_save")
+        self._check(c, "저장 후 한글로 바로 열기", "open_after_save", last=True)
+
+        # 양식
+        c = self.card(inner, "양식")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        self._entry(c, "내 양식 폴더", "user_forms_dir", browse="dir", on_change=self.reload_forms)
+        row = self._row(c, "기본 서식", "PDF 양식·자유 작성 문서에 쓰는 서식")
+        styles = [p.name for p in sorted(BUILTIN_FORMS_DIR.glob("*.hwpx"))]
+        v = tk.StringVar(value=self.s.get("base_style_form"))
+        v.trace_add("write", lambda *a: (self._set("base_style_form", v.get()), self._on_form_change()))
+        ttk.Combobox(row, textvariable=v, values=styles, state="readonly", font=FONT).pack(fill="x")
+        tk.Frame(c, bg=CARD, height=8).pack()
+
+        # 미리보기
+        c = self.card(inner, "미리보기")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        self._check(c, "한글로 쪽 이미지 미리보기 (한글 설치 필요)", "auto_preview")
+        self._spin(c, "해상도 (DPI)", "preview_dpi", 72, 200, 12)
+        self._spin(c, "기본 확대율 (%)", "preview_zoom", 30, 250, 10, last=True)
+
+        # 한글 보안 모듈
+        import hwp_security
+        c = self.card(inner, "한글 '접근 허용' 경고 없애기")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        tk.Label(c, text="한컴 디벨로퍼 사이트(한글 오토메이션 → 보안 승인 모듈)에서 받은 DLL 파일을 선택하면\n"
+                         "등록되어, 미리보기·저장 때 뜨던 '접근 허용' 창이 더 이상 나오지 않습니다.",
+                 bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
+        row = tk.Frame(c, bg=CARD)
+        row.pack(fill="x", padx=14, pady=(8, 12))
+        ok, msg = hwp_security.status()
+        self._sec_var = tk.StringVar(value=("✓ " if ok else "✗ ") + msg)
+        self._sec_lbl = tk.Label(row, textvariable=self._sec_var, bg=CARD, font=FONT,
+                                 fg="#067647" if ok else DANGER)
+        self._sec_lbl.pack(side="left")
+        button(row, "DLL 선택…", self._install_security_dll).pack(side="right")
+
+        # 고급
+        c = self.card(inner, "AI 고급 옵션")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        self._spin(c, "최대 출력 토큰", "max_tokens", 2000, 128000, 1000)
+        self._spin(c, "창의성 (temperature)", "temperature", 0.0, 1.0, 0.1, is_float=True)
+        self._spin(c, "참고 자료 최대 글자 수", "ref_max_chars", 2000, 200000, 2000)
+        self._spin(c, "응답 대기 시간 (초)", "request_timeout", 60, 1800, 30)
+        self._check(c, "수정 요청 때 AI에게 한글 화면(쪽 이미지)과 쪽 나눔 보여주기", "ai_sees_screen")
+        self._spin(c, "AI에게 보여줄 최대 쪽 수", "max_screen_pages", 1, 20, 1, last=True)
+
+        bottom = tk.Frame(inner, bg=BG)
+        bottom.pack(fill="x", padx=24, pady=18)
+        self._saved_lbl = tk.StringVar(value="변경 사항은 자동으로 저장됩니다.")
+        tk.Label(bottom, textvariable=self._saved_lbl, bg=BG, fg=MUTED, font=FONT_SM).pack(side="left")
+        button(bottom, "미리보기 캐시 비우기", self._clear_cache).pack(side="right")
+
+    CLI_GUIDE = {
+        "claude_code": ("Claude Pro/Max 구독이 있으면 사용할 수 있습니다.",
+                        "설치: PowerShell에서  irm https://claude.ai/install.ps1 | iex\n"
+                        "로그인: 설치 후 명령 프롬프트에서  claude  를 한 번 실행해 로그인"),
+        "codex": ("ChatGPT Plus/Pro 구독이 있으면 사용할 수 있습니다. (Node.js 필요)",
+                  "설치: 명령 프롬프트에서  npm install -g @openai/codex\n"
+                  "로그인: 설치 후  codex  를 한 번 실행해 'ChatGPT로 로그인' 선택"),
+    }
+
+    def _build_cli_card(self, inner):
+        import llm
+        c = self.card(inner, "API 키 없이 쓰기 — 구독 계정 연결")
+        c.pack(fill="x", padx=24, pady=(14, 0))
+        tk.Label(c, text="API 키가 없어도, 컴퓨터에 Claude Code나 Codex를 설치하고 로그인해 두면 그 구독으로 한큐를 쓸 수 있습니다.\n"
+                         "위의 API 방식보다 느릴 수 있습니다(한 번에 30초~2분).",
+                 bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
+        self._cli_status = {}
+        for pid, pname in CLI_PROVIDERS.items():
+            box = tk.Frame(c, bg=CARD, highlightthickness=1, highlightbackground=SOFT)
+            box.pack(fill="x", padx=14, pady=(8, 0))
+            head = tk.Frame(box, bg=CARD)
+            head.pack(fill="x", padx=10, pady=(8, 2))
+            ttk.Radiobutton(head, text=pname, variable=self._provider_var, value=pid).pack(side="left")
+            st_var = tk.StringVar()
+            st_lbl = tk.Label(head, textvariable=st_var, bg=CARD, font=FONT_SM)
+            st_lbl.pack(side="left", padx=10)
+            self._cli_status[pid] = (st_var, st_lbl)
+            button(head, "연결 확인", lambda p=pid: self._check_cli(p, verbose=True)).pack(side="right")
+
+            desc, how = self.CLI_GUIDE[pid]
+            tk.Label(box, text=desc, bg=CARD, fg=TEXT, font=FONT_SM).pack(anchor="w", padx=12)
+            tk.Label(box, text=how, bg=CARD, fg=MUTED, font=("Consolas", 9), justify="left"
+                     ).pack(anchor="w", padx=12, pady=(2, 4))
+
+            row = tk.Frame(box, bg=CARD)
+            row.pack(fill="x", padx=12, pady=(0, 10))
+            tk.Label(row, text="실행 파일", bg=CARD, fg=TEXT, font=FONT_SM, width=8, anchor="w").pack(side="left")
+            pv = tk.StringVar(value=self.s.get("cli_paths", {}).get(pid, ""))
+            pv.trace_add("write", lambda *a, p=pid, v=pv: self._set_nested("cli_paths", p, v.get().strip()))
+            tk.Entry(row, textvariable=pv, bg="#fbfcfe", fg=TEXT, relief="flat", font=FONT_SM,
+                     highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT
+                     ).pack(side="left", fill="x", expand=True, ipady=3)
+            button(row, "찾기…", lambda v=pv: (lambda f: f and v.set(f))(filedialog.askopenfilename(
+                title="실행 파일 선택", filetypes=[("실행 파일", "*.exe *.cmd"), ("모든 파일", "*.*")]))
+                   ).pack(side="left", padx=(6, 0))
+            tk.Label(row, text="모델", bg=CARD, fg=TEXT, font=FONT_SM).pack(side="left", padx=(12, 4))
+            mv = tk.StringVar(value=self.s["models"].get(pid, ""))
+            mv.trace_add("write", lambda *a, p=pid, v=mv: self._set_nested("models", p, v.get().strip()))
+            ttk.Combobox(row, textvariable=mv, width=12, font=FONT_SM,
+                         values=["", "sonnet", "opus", "haiku"] if pid == "claude_code" else ["", "gpt-5", "gpt-5-codex"]
+                         ).pack(side="left")
+            self._check_cli(pid, verbose=False)
+        tk.Label(c, text="실행 파일 칸을 비워 두면 자동으로 찾습니다. 모델 칸을 비워 두면 그 프로그램의 기본 모델을 씁니다.",
+                 bg=CARD, fg=MUTED, font=FONT_SM).pack(anchor="w", padx=14, pady=(0, 10))
+
+    def _check_cli(self, pid, verbose: bool):
+        import llm
+        st_var, st_lbl = self._cli_status[pid]
+        path = self.s.get("cli_paths", {}).get(pid, "").strip() or llm.find_cli(pid)
+        if not path:
+            st_var.set("✗ 설치되지 않음")
+            st_lbl.configure(fg=DANGER)
+            if verbose:
+                messagebox.showinfo("찾을 수 없음", f"{CLI_PROVIDERS[pid]}가 설치되어 있지 않습니다.\n"
+                                                 "아래 안내대로 설치한 뒤 다시 [연결 확인]을 눌러 주세요.")
+            return
+        if not verbose:
+            where = ("Claude 앱에 포함됨" if "Claude-Data" in path else
+                     "Codex 앱에 포함됨" if "OpenAI" in path else "설치됨")
+            st_var.set(f"● 자동으로 찾음 ({where})")
+            st_lbl.configure(fg="#067647")
+            return
+
         def run():
             try:
-                from hwp_controller import HwpController
-                hwp = HwpController()
-                hwp.connect()
-                self.after(0, lambda: self._hwp_status_var.set("연결됨 ✓"))
-                self.after(0, lambda: messagebox.showinfo("연결 성공", "HWP COM 연결 성공!"))
+                ver = llm.cli_version(pid, path)
+                self.after(0, lambda: (st_var.set(f"✓ 연결됨 {ver[:40]}"), st_lbl.configure(fg="#067647"),
+                                       messagebox.showinfo("연결 확인", f"{CLI_PROVIDERS[pid]} 사용 가능\n{path}\n{ver}\n\n"
+                                                                    "로그인이 안 되어 있으면 첫 생성 때 오류가 납니다.")))
             except Exception as e:
-                err_msg = str(e)
-                self.after(0, lambda: self._hwp_status_var.set("연결 실패 ✗"))
-                self.after(0, lambda: messagebox.showerror("연결 실패", err_msg))
+                err = str(e)
+                self.after(0, lambda: (st_var.set("✗ 실행 실패"), st_lbl.configure(fg=DANGER),
+                                       messagebox.showerror("연결 확인", err[:400])))
         threading.Thread(target=run, daemon=True).start()
 
-    def _set_status(self, msg: str):
-        self._status_var.set(msg)
+    def _row(self, parent, label, hint=None):
+        row = tk.Frame(parent, bg=CARD)
+        row.pack(fill="x", padx=14, pady=4)
+        lab = tk.Frame(row, bg=CARD, width=200)
+        lab.pack(side="left", fill="y")
+        lab.pack_propagate(False)
+        tk.Label(lab, text=label, bg=CARD, fg=TEXT, font=FONT).pack(anchor="w")
+        if hint:
+            tk.Label(lab, text=hint, bg=CARD, fg=MUTED, font=("Malgun Gothic", 8),
+                     wraplength=190, justify="left").pack(anchor="w")
+            lab.configure(height=40)
+        else:
+            lab.configure(height=28)
+        body = tk.Frame(row, bg=CARD)
+        body.pack(side="left", fill="x", expand=True)
+        return body
 
+    def _entry(self, parent, label, key, hint=None, browse=None, on_change=None, last=False):
+        body = self._row(parent, label, hint)
+        v = tk.StringVar(value=str(self.s.get(key, "")))
 
-# ── New Template Dialog ────────────────────────────────────────────────────
+        def changed(*a):
+            self._set(key, v.get())
+            if on_change:
+                self.after(300, on_change)
+        v.trace_add("write", changed)
+        tk.Entry(body, textvariable=v, bg="#fbfcfe", fg=TEXT, relief="flat", font=FONT,
+                 highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT
+                 ).pack(side="left", fill="x", expand=True, ipady=4)
+        if browse == "dir":
+            button(body, "찾기…", lambda: (lambda d: d and v.set(d))(
+                filedialog.askdirectory(initialdir=v.get() or None))).pack(side="left", padx=(6, 0))
+        if last:
+            tk.Frame(parent, bg=CARD, height=8).pack()
 
-class NewTemplateDialog(tk.Toplevel):
-    def __init__(self, parent, tmgr, on_save):
-        super().__init__(parent)
-        self.title("새 템플릿 만들기")
-        self.geometry("640x520")
-        self.configure(bg=BG_DARK)
-        self.resizable(True, True)
-        self.grab_set()
-        self._tmgr = tmgr
-        self._on_save = on_save
+    def _check(self, parent, label, key, last=False):
+        v = tk.BooleanVar(value=bool(self.s.get(key, True)))
+        v.trace_add("write", lambda *a: self._set(key, v.get()))
+        ttk.Checkbutton(parent, text=label, variable=v).pack(anchor="w", padx=14, pady=4)
+        if last:
+            tk.Frame(parent, bg=CARD, height=8).pack()
 
-        from ai_generator import DOC_TYPE_PROMPTS
-        doc_types = list(DOC_TYPE_PROMPTS.keys())
+    def _spin(self, parent, label, key, lo, hi, step, is_float=False, last=False):
+        body = self._row(parent, label)
+        v = tk.StringVar(value=str(self.s.get(key)))
 
-        pad = dict(padx=16, pady=6)
+        def changed(*a):
+            try:
+                val = float(v.get()) if is_float else int(float(v.get()))
+            except ValueError:
+                return
+            self._set(key, max(lo, min(hi, val)))
+        v.trace_add("write", changed)
+        ttk.Spinbox(body, from_=lo, to=hi, increment=step, textvariable=v, width=10,
+                    font=FONT).pack(side="left")
+        if last:
+            tk.Frame(parent, bg=CARD, height=8).pack()
 
-        tk.Label(self, text="템플릿 이름", bg=BG_DARK, fg=FG_WHITE, font=FONT_UI).pack(anchor="w", **pad)
-        self._name_var = tk.StringVar()
-        tk.Entry(self, textvariable=self._name_var, bg=BG_INPUT, fg=FG_WHITE,
-                 insertbackground=FG_WHITE, relief="flat", font=FONT_UI,
-                 highlightthickness=1, highlightbackground=BORDER).pack(
-                     fill="x", padx=16, ipady=4)
+    def _set(self, key, value):
+        self.s[key] = value
+        self._schedule_save()
 
-        tk.Label(self, text="문서 유형", bg=BG_DARK, fg=FG_WHITE, font=FONT_UI).pack(anchor="w", **pad)
-        self._dtype_var = tk.StringVar(value="보고서")
-        ttk.Combobox(self, textvariable=self._dtype_var, values=doc_types,
-                     state="readonly", font=FONT_UI).pack(fill="x", padx=16)
+    def _set_nested(self, key, sub, value):
+        self.s.setdefault(key, {})[sub] = value
+        self._schedule_save()
 
-        tk.Label(self, text="설명 (선택)", bg=BG_DARK, fg=FG_WHITE, font=FONT_UI).pack(anchor="w", **pad)
-        self._desc_var = tk.StringVar()
-        tk.Entry(self, textvariable=self._desc_var, bg=BG_INPUT, fg=FG_WHITE,
-                 insertbackground=FG_WHITE, relief="flat", font=FONT_UI,
-                 highlightthickness=1, highlightbackground=BORDER).pack(
-                     fill="x", padx=16, ipady=4)
+    def _schedule_save(self):
+        if self._save_job:
+            self.after_cancel(self._save_job)
+        self._save_job = self.after(400, self._save_settings)
 
-        hint = "힌트: {{필드명}} 형식으로 채울 영역을 표시하세요. 예) {{제목}}, {{내용}}"
-        tk.Label(self, text=hint, bg=BG_DARK, fg=FG_MUTED, font=FONT_SM).pack(anchor="w", padx=16)
+    def _save_settings(self):
+        self._save_job = None
+        try:
+            cfg.save(self.s)
+            if hasattr(self, "_saved_lbl"):
+                self._saved_lbl.set(f"저장됨 ({datetime.datetime.now():%H:%M:%S})")
+        except Exception as e:
+            self.status("설정 저장 실패")
+            messagebox.showerror("설정 저장 실패", f"{cfg.SETTINGS_FILE}\n\n{e}")
 
-        tk.Label(self, text="템플릿 내용", bg=BG_DARK, fg=FG_WHITE, font=FONT_UI).pack(anchor="w", **pad)
-        self._content_text = scrolledtext.ScrolledText(
-            self, bg=BG_INPUT, fg=FG_WHITE, insertbackground=FG_WHITE,
-            relief="flat", font=FONT_MONO, wrap="word",
-            highlightthickness=1, highlightbackground=BORDER)
-        self._content_text.pack(fill="both", expand=True, padx=16)
-        self._content_text.insert("1.0",
-            "{{제목}}\n\n1. 개요\n{{개요}}\n\n2. 내용\n{{내용}}\n\n3. 결론\n{{결론}}\n")
+    def _refresh_models(self, pid):
+        key = self.s["api_keys"].get(pid, "").strip()
+        self.status(f"{PROVIDERS[pid]} 모델 목록 불러오는 중…")
 
-        btn_row = tk.Frame(self, bg=BG_DARK)
-        btn_row.pack(fill="x", padx=16, pady=10)
-        styled_button(btn_row, "저장", self._save, accent=True).pack(side="left", padx=(0, 8))
-        styled_button(btn_row, "취소", self.destroy).pack(side="left")
+        def run():
+            import llm
+            try:
+                models = llm.list_models(pid, key)
+                self.after(0, lambda: self._models_loaded(pid, models))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: (self.status("모델 목록 실패"),
+                                       messagebox.showerror("모델 목록", err[:400])))
+        threading.Thread(target=run, daemon=True).start()
 
-    def _save(self):
-        name = self._name_var.get().strip()
-        if not name:
-            messagebox.showwarning("이름 필요", "템플릿 이름을 입력해주세요.", parent=self)
+    def _models_loaded(self, pid, models):
+        self._model_combos[pid]["values"] = models
+        self.s.setdefault("model_lists", {})[pid] = models
+        self._schedule_save()
+        self.status(f"{PROVIDERS[pid]} 모델 {len(models)}개")
+
+    def _install_security_dll(self):
+        import hwp_security
+        path = filedialog.askopenfilename(title="한글 보안 승인 모듈 DLL 선택",
+                                          filetypes=[("DLL", "*.dll")])
+        if not path:
             return
-        content = self._content_text.get("1.0", "end").strip()
-        if not content:
-            messagebox.showwarning("내용 필요", "템플릿 내용을 입력해주세요.", parent=self)
+        try:
+            hwp_security.install(path)
+        except OSError as e:
+            messagebox.showerror("등록 실패", str(e))
             return
-        self._tmgr.save_template(name, self._dtype_var.get(), content, self._desc_var.get())
-        self._on_save()
-        messagebox.showinfo("저장 완료", f"'{name}' 템플릿이 저장되었습니다.", parent=self)
+        ok, msg = hwp_security.status()
+        self._sec_var.set(("✓ " if ok else "✗ ") + msg)
+        self._sec_lbl.configure(fg="#067647" if ok else DANGER)
+        # 이미 떠 있는 미리보기용 한글을 새로 띄워야 모듈이 적용된다
+        self.renderer.shutdown()
+        from preview import Renderer
+        self.renderer = Renderer()
+        messagebox.showinfo("등록 완료", "보안 승인 모듈을 등록했습니다.\n다음 미리보기부터 '접근 허용' 창이 뜨지 않습니다.")
+
+    def _clear_cache(self):
+        shutil.rmtree(CACHE_DIR, ignore_errors=True)
+        self.status("미리보기 캐시를 비웠습니다.")
+
+    def _on_close(self):
+        self.s["window_geometry"] = self.geometry()
+        self._save_settings()
+        self.renderer.shutdown()
         self.destroy()

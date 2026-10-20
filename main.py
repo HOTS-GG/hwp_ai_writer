@@ -1,5 +1,5 @@
 """
-HWP AI 문서 생성기 - 진입점
+한큐(HanQ) - 진입점
 실행: python main.py
 """
 import os
@@ -20,7 +20,13 @@ def main():
                     k, _, v = line.partition("=")
                     os.environ.setdefault(k.strip(), v.strip())
 
-    import tkinter as tk
+    # 작업 표시줄에 python 아이콘 대신 한큐 아이콘이 나오도록 앱 ID 지정
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HanQ.DocumentWriter")
+    except Exception:
+        pass
+
     from ui import App
 
     app = App()
