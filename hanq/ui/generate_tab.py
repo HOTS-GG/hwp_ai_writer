@@ -180,7 +180,7 @@ class GenerateTab:
             self._show_ref()
             return
         self.preview.set_title(f"참고 자료 — {Path(path).name}")
-        self.app.preview_file(self.preview, path)
+        self.app.preview_file(self.preview, path, original=True)
 
     def _show_ref(self):
         """AI에게 실제로 보내는 글(표는 '| 칸 |' 줄)을 보여준다."""

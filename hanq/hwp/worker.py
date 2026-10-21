@@ -25,12 +25,29 @@ class HwpWorker:
         self.available: bool | None = None if IS_WIN else False
         self._q: queue.Queue = queue.Queue()
         self.stuck = False   # 한글이 응답하지 않는 중 (그동안 미리보기는 간이 렌더러로)
+        self.ready = False   # 이번 실행에서 한글로 쪽 이미지를 한 번이라도 만들었음 (접근 허용됨)
         self.on_prompt = None   # 한글이 '접근 허용' 창을 띄웠을 때 부를 함수 (안내용)
         self._pid = None
+        self._frame_no = 0
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     # ── 공개 작업 ───────────────────────────────────────────────────────
+    def render_frame(self, data: bytes, dpi: int, focus_key=None, timeout: float = 20.0):
+        """실시간 화면 한 장: 메모리의 hwpx를 한글로 그려 (쪽 이미지 경로 목록, 강조 줄의 쪽 번호 0부터)를
+        기다려서 돌려준다. 한글을 쓸 수 없거나 실패·시간 초과면 None."""
+        if not self.ready or self.stuck:
+            return None
+        done = threading.Event()
+        box = {}
+
+        def cb(result, err):
+            box["result"], box["err"] = result, err
+            done.set()
+        self._q.put(("frame", (data, dpi, focus_key), cb))
+        if not done.wait(timeout) or box.get("err"):
+            return None
+        return box["result"]
     def render(self, path: str, dpi: int, callback):
         """callback(list[str] png 경로, error 또는 None) — 작업 스레드에서 불린다."""
         if self.stuck:
@@ -78,15 +95,17 @@ class HwpWorker:
                 job = self._q.get()
                 if job is None:
                     break
-                # 쌓인 미리보기 요청은 마지막 것만 (변환은 모두 처리)
-                if job[0] == "render":
+                # 쌓인 미리보기·실시간 화면 요청은 종류별로 마지막 것만 (변환은 모두 처리)
+                if job[0] in ("render", "frame"):
                     pending = []
                     while not self._q.empty():
                         nxt = self._q.get()
                         if nxt is None:
                             self._q.put(None)
                             break
-                        if nxt[0] == "render":
+                        if nxt[0] == job[0]:
+                            if job[0] == "frame":   # 기다리는 쪽이 멈추지 않게 바로 답한다
+                                job[2](None, "더 새 요청으로 건너뜀")
                             job = nxt
                         else:
                             pending.append(nxt)
@@ -109,6 +128,7 @@ class HwpWorker:
 
         def on_timeout():
             self.stuck = True
+            self.ready = False
             answer(self._fallback(*args[:2]) if kind == "render" else None, STUCK_HINT)
 
         # 제한 시간이 지나면 먼저 알린다 (COM 호출 자체는 끊을 수 없다)
@@ -128,13 +148,19 @@ class HwpWorker:
                 if not IS_WIN:
                     answer(self._fallback(path, dpi), None)
                     return
-                answer(self._export(self._get_hwp(), path, dpi), None)
+                pages = self._export(self._get_hwp(), path, dpi)
+                self.ready = True
+                answer(pages, None)
+            elif kind == "frame":
+                answer(self._frame(self._get_hwp(), *args), None)
             else:
                 src, out, fmt = args
                 answer(self._convert(self._get_hwp(), src, out, fmt), None)
         except Exception as e:
             self._quit()
-            if kind == "render":
+            if kind == "frame":
+                answer(None, f"한글 실시간 화면 실패: {e}")
+            elif kind == "render":
                 answer(self._fallback(*args[:2]), f"한글 미리보기 실패: {e}")
             else:
                 answer(None, f"한글로 변환하지 못했습니다: {e}")
@@ -187,6 +213,39 @@ class HwpWorker:
             except Exception:
                 pass
             self._hwp = None
+
+    def _frame(self, hwp, data: bytes, dpi: int, focus_key=None):
+        """실시간 화면: hwpx 바이트를 임시 파일로 열어 모든 쪽을 그리고, 강조 줄이 있는 쪽 번호를 찾는다.
+        (쪽 이미지 경로 목록, 쪽 번호 0부터 또는 None)."""
+        from PIL import Image
+        self._frame_no += 1
+        d = CACHE_DIR / "frames" / f"{self._frame_no % 3}"     # 화면이 읽는 중인 이전 것은 남겨 둔다
+        d.mkdir(parents=True, exist_ok=True)
+        for old in d.glob("*"):
+            old.unlink(missing_ok=True)
+        src = d / "frame.hwpx"
+        src.write_bytes(data)
+        if not hwp.Open(str(src), "HWPX", "forceopen:true;versionwarning:false"):
+            raise RuntimeError("실시간 화면 문서를 열 수 없습니다.")
+        try:
+            focus_page = None
+            if focus_key is not None and focus_key[0] == 0:   # SetPos는 첫 구역 본문 문단 번호로 찾는다
+                try:
+                    hwp.SetPos(0, int(focus_key[1]), 0)
+                    focus_page = int(hwp.KeyIndicator()[3]) - 1
+                except Exception:
+                    focus_page = None
+            pages = []
+            for i in range(hwp.PageCount):
+                bmp = d / f"page_{i:03d}.bmp"
+                hwp.CreatePageImage(str(bmp), i, dpi, 24, "bmp")
+                png = d / f"page_{i:03d}.png"
+                Image.open(bmp).save(png, optimize=False)
+                bmp.unlink(missing_ok=True)
+                pages.append(str(png))
+        finally:
+            hwp.Clear(1)
+        return pages, focus_page
 
     def _export(self, hwp, path: str, dpi: int) -> list[str]:
         from PIL import Image

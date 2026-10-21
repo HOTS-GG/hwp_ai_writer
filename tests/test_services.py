@@ -172,3 +172,43 @@ class JobTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HangulLiveTest(unittest.TestCase):
+    """한글을 쓸 수 있으면(접근 허용됨) 실시간 화면을 한글이 그리고, 못 쓰면 다른 엔진으로 넘어간다."""
+
+    class FakeHangul:
+        def __init__(self, ready, pages):
+            self.ready, self.stuck, self.pages, self.calls = ready, False, pages, []
+
+        def render_frame(self, data, dpi, focus_key=None, timeout=20.0):
+            self.calls.append(focus_key)
+            return (self.pages, 1) if self.pages else None
+
+    def _frame_bytes(self):
+        doc = HwpxDocument(PLAN_FORM)
+        o = Outline(doc)
+        o.lines[find_line(o, "1. 행사명")].set(FOCUS_ATTR, "1")
+        return doc.to_bytes()
+
+    def test_uses_hangul_when_ready(self):
+        from PIL import Image
+        from hanq.services.live import LiveView
+        with tempfile.TemporaryDirectory() as d:
+            png = str(Path(d) / "p.png")
+            Image.new("RGB", (10, 10), "white").save(png)
+            fake = self.FakeHangul(True, [png, png])
+            live = LiveView(lambda r, t: None, hangul=fake)
+            res = live._render("bytes", self._frame_bytes())
+            live.close()
+        self.assertEqual(len(res.pages), 2)
+        self.assertEqual(res.focus_page, 1)
+        self.assertIsNotNone(fake.calls[0], "강조 줄 위치를 한글에 넘겨야 함")
+
+    def test_falls_back_when_not_ready_or_failed(self):
+        from hanq.services.live import LiveView
+        for fake in (self.FakeHangul(False, ["x"]), self.FakeHangul(True, [])):
+            live = LiveView(lambda r, t: None, hangul=fake)
+            res = live._render("bytes", self._frame_bytes())
+            live.close()
+            self.assertGreaterEqual(len(res.pages), 2)

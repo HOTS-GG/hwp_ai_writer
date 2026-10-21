@@ -74,7 +74,7 @@ class App(tk.Tk):
         from ..hwp.rhwp import get_rhwp
         self.rhwp = get_rhwp(self.s.get("rhwp_path", ""))
         self.live = LiveView(lambda result, token: self.after(0, self._on_live_frame, result, token),
-                             dpi=int(self.s.get("preview_dpi", 96)), rhwp=self.rhwp)
+                             dpi=int(self.s.get("preview_dpi", 96)), rhwp=self.rhwp, hangul=self.worker)
         self._panes = []
 
         apply_ttk_style(self)
@@ -227,7 +227,8 @@ class App(tk.Tk):
             if pane.token == token:
                 live_job = token[0] == "job"
                 if live_job:
-                    note = "실시간 미리보기"
+                    note = {"hangul": "실시간 미리보기 (한글)", "rhwp": "실시간 미리보기 (rhwp — 한글과 조금 다를 수 있음)"}.get(
+                        self.live.engine, "실시간 미리보기 (간이 — 한글과 다를 수 있음)")
                 else:
                     note = "" if self.rhwp else "빠른 미리보기 (실제 한글과 조금 다를 수 있음)"
                 pane.show_pages(result.pages, note,
@@ -235,7 +236,7 @@ class App(tk.Tk):
                                 keep_scroll=token == pane.keep_token)
                 pane.keep_token = token
 
-    def preview_file(self, pane, path: str, note: str = ""):
+    def preview_file(self, pane, path: str, note: str = "", original: bool = False):
         """문서 모양 미리보기 — 빠른 것부터 보여주고 더 정확한 것으로 바꾼다.
           1) rhwp(있으면, 실제 한글과 거의 같음) 또는 간이 렌더링을 바로
           2) 윈도우 한글이 있고 설정이 켜져 있으면 한글이 직접 그린 쪽 이미지로 교체 (가장 정확)"""
@@ -251,7 +252,7 @@ class App(tk.Tk):
         is_hwpx = path.lower().endswith(".hwpx")
         first = None
         if self.rhwp is not None:
-            self.live.submit_file(path, token)
+            self.live.submit_file(path, token, original)
         elif is_hwpx:
             try:
                 self.live.submit(Path(path).read_bytes(), token)
@@ -386,6 +387,7 @@ class App(tk.Tk):
         """보안 모듈을 새로 등록한 뒤: 이미 떠 있는 한글을 새로 띄워야 적용된다."""
         self.worker.shutdown()
         self.worker = self._new_worker()
+        self.live.hangul = self.worker
 
     def _new_worker(self) -> HwpWorker:
         from ..hwp.worker import PROMPT_HINT

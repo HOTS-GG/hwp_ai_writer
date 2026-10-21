@@ -61,7 +61,7 @@ class FormsTab:
             return
         self.preview.set_title(f"미리보기 — {f['name']}")
         self._info.set("기본 제공 양식" if f["builtin"] else f"내 양식 · {Path(f['path']).name}")
-        self.app.preview_file(self.preview, f["path"])
+        self.app.preview_file(self.preview, f["path"], original=True)
 
     def _use(self):
         f = self._selected()
