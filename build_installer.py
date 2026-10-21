@@ -1,11 +1,12 @@
 """
-한큐(HanQ) 설치 파일 만들기
-실행: python build_installer.py           (exe를 새로 빌드한 뒤 설치 파일 생성)
-      python build_installer.py --no-build (이미 만든 dist\\HanQ 로 설치 파일만 생성)
-결과: installer_output\\HanQ_Setup_<버전>.exe
-필요: Inno Setup 6 (winget install JRSoftware.InnoSetup)
+한큐(HanQ) 설치 파일 만들기 — 윈도우에서는 설치 exe, 맥에서는 dmg
+실행: python build_installer.py           (프로그램을 새로 빌드한 뒤 설치 파일 생성)
+      python build_installer.py --no-build (이미 만든 dist 로 설치 파일만 생성)
+결과: 윈도우  installer_output\\HanQ_Setup_<버전>.exe   (필요: Inno Setup 6 — winget install JRSoftware.InnoSetup)
+      맥      installer_output/HanQ_<버전>_mac_<arm64|x86_64>.dmg
 """
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -61,7 +62,69 @@ def find_iscc() -> str | None:
     return shutil.which("ISCC")
 
 
+MAC_INFO_TEXT = """한큐(HanQ) {ver} — 맥에서 처음 실행하기
+
+1. HanQ 아이콘을 옆의 Applications(응용 프로그램) 폴더로 끌어다 놓으세요.
+
+2. 처음 열 때 "확인되지 않은 개발자" / "악성 코드가 없음을 확인할 수 없음" 경고가 뜨면
+   - 시스템 설정 → 개인정보 보호 및 보안 → 아래쪽 '그래도 열기'를 누르거나
+   - 터미널에서 한 번 실행:  xattr -cr /Applications/HanQ.app
+   (Apple 개발자 인증서로 서명하지 않은 앱이라 뜨는 경고입니다.)
+
+
+■ 맥에서 달라지는 점
+
+- 문서 미리보기는 HWPX 안에 들어 있는 첫 쪽 이미지만 보입니다.
+  (쪽 전체 미리보기·HWP→HWPX 변환은 윈도우용 한글의 자동화 기능이 필요합니다.)
+- [한글로 열기]는 맥용 한컴오피스 한글(또는 한글 뷰어)로 문서를 엽니다.
+- 기존 .hwp 양식은 맥용 한글에서 HWPX로 저장한 뒤 추가해 주세요.
+- 설정·API 키·내 양식은 ~/Library/Application Support/HWP_AI_Writer 에 저장됩니다.
+
+
+■ API 키 없이 쓰기 (구독 계정)
+
+- Claude Code: 터미널에서  curl -fsSL https://claude.ai/install.sh | bash  후  claude  로그인
+- Codex:       터미널에서  brew install codex  후  codex  로그인
+
+
+■ 개인정보 주의
+
+작성 요청과 첨부한 참고 자료는 선택한 AI 회사의 서버로 전송됩니다.
+학생 이름·연락처·성적 같은 개인정보는 넣지 마세요.
+"""
+
+
+def build_dmg():
+    """dist/HanQ.app + Applications 바로가기 + 안내문을 묶어 dmg를 만든다."""
+    from build_exe import output_path
+    app = output_path()
+    if not app.exists():
+        print(f"{app} 가 없습니다. 먼저 build_exe.py를 실행하세요.")
+        sys.exit(1)
+    stage = HERE / "build" / "dmg"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    # cp 대신 ditto: 번들 안의 심볼릭 링크·서명을 그대로 보존
+    subprocess.run(["ditto", str(app), str(stage / app.name)], check=True)
+    (stage / "Applications").symlink_to("/Applications")
+    (stage / "처음 실행 안내.txt").write_text(MAC_INFO_TEXT.format(ver=APP_VERSION), encoding="utf-8")
+
+    out_dir = HERE / "installer_output"
+    out_dir.mkdir(exist_ok=True)
+    out = out_dir / f"HanQ_{APP_VERSION}_mac_{platform.machine()}.dmg"
+    out.unlink(missing_ok=True)
+    subprocess.run(["hdiutil", "create", "-volname", f"HanQ {APP_VERSION}", "-srcfolder", str(stage),
+                    "-ov", "-format", "UDZO", str(out)], check=True)
+    print(f"\n설치 파일: {out}  ({out.stat().st_size / 1024 / 1024:.0f}MB)")
+
+
 def main():
+    if sys.platform == "darwin":
+        if "--no-build" not in sys.argv:
+            if subprocess.run([sys.executable, str(HERE / "build_exe.py")], cwd=HERE).returncode != 0:
+                sys.exit(1)
+        build_dmg()
+        return
     iscc = find_iscc()
     if not iscc:
         print("Inno Setup 6이 없습니다. 설치: winget install JRSoftware.InnoSetup")

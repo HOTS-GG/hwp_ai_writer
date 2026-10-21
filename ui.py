@@ -9,6 +9,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import settings as cfg
+from platform_util import (EN_FAMILY, FONT_PLUS, IS_MAC, IS_WIN, MONO_FAMILY, font, open_path,
+                           wheel_units, zoom_modifier)
 from settings import (ALL_PROVIDERS, BUILTIN_FORMS_DIR, CACHE_DIR, CLI_PROVIDERS,
                       DEFAULT_MODELS, PROVIDERS)
 
@@ -24,14 +26,41 @@ BORDER = "#d0d7e2"
 SOFT = "#e8eef8"
 DANGER = "#d92d20"
 PREVIEW_BG = "#8a94a6"
-FONT = ("Malgun Gothic", 10)
-FONT_B = ("Malgun Gothic", 10, "bold")
-FONT_SM = ("Malgun Gothic", 9)
-FONT_H = ("Malgun Gothic", 12, "bold")
+FONT = font(10)
+FONT_B = font(10, "bold")
+FONT_SM = font(9)
+FONT_H = font(12, "bold")
 
 APP_NAME = "한큐"
 APP_NAME_EN = "HanQ"
 FREE_FORM = "자유 작성 (기본 서식)"
+
+
+class _FlatButton(tk.Label):
+    """맥의 tk.Button은 배경색을 무시하고 회색 기본 버튼으로 그려지므로, Label로 같은 모양을 만든다."""
+
+    def __init__(self, parent, command, **kw):
+        super().__init__(parent, **kw)
+        self._command = command
+        self._bg, self._hover = kw["bg"], kw["activebackground"]
+        self.bind("<ButtonRelease-1>", self._click)
+        self.bind("<Enter>", lambda e: self._enabled() and super(_FlatButton, self).configure(bg=self._hover))
+        self.bind("<Leave>", lambda e: super(_FlatButton, self).configure(bg=self._bg))
+
+    def _enabled(self) -> bool:
+        return str(self.cget("state")) != "disabled"
+
+    def _click(self, e):
+        inside = 0 <= e.x < self.winfo_width() and 0 <= e.y < self.winfo_height()
+        if inside and self._enabled():
+            self._command()
+
+    def configure(self, cnf=None, **kw):
+        if kw.get("state") == "disabled":
+            kw.setdefault("bg", self._bg)
+        return super().configure(cnf, **kw)
+
+    config = configure
 
 
 def button(parent, text, command, kind="normal", **kw):
@@ -40,7 +69,7 @@ def button(parent, text, command, kind="normal", **kw):
         "danger": (CARD, DANGER, "#fdecea"),
         "normal": (SOFT, TEXT, "#d8e3f5"),
     }[kind]
-    return tk.Button(parent, text=text, command=command, bg=colors[0], fg=colors[1],
+    return (_FlatButton if IS_MAC else tk.Button)(parent, text=text, command=command, bg=colors[0], fg=colors[1],
                      activebackground=colors[2], activeforeground=colors[1],
                      relief="flat", bd=0, padx=12, pady=6, cursor="hand2",
                      font=FONT_B if kind == "primary" else FONT, **kw)
@@ -95,10 +124,10 @@ class PreviewPane(tk.Frame):
         self.show_message("미리볼 문서가 없습니다.")
 
     def _wheel(self, e):
-        if e.state & 0x4:
+        if zoom_modifier(e):
             self.set_zoom(self._zoom + (10 if e.delta > 0 else -10))
         else:
-            self.canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
+            self.canvas.yview_scroll(wheel_units(e), "units")
 
     def set_title(self, s):
         self._title_var.set(s)
@@ -157,7 +186,7 @@ class PreviewPane(tk.Frame):
             w = min(cw - 40, 820)
             x = (cw - w) // 2
             item = c.create_text(x + 30, 46, text=self._text, anchor="nw", width=w - 60,
-                                 font=("Malgun Gothic", 10), fill=TEXT)
+                                 font=font(10), fill=TEXT)
             bbox = c.bbox(item)
             c.create_rectangle(x, 16, x + w, bbox[3] + 30, fill="#ffffff", outline="")
             c.tag_raise(item)
@@ -205,8 +234,9 @@ class App(tk.Tk):
 
         self._style()
         self._build()
-        import ime_font
-        ime_font.install(self)
+        if IS_WIN:  # 조합 중 글자 크기 문제는 윈도우 입력기에만 있다
+            import ime_font
+            ime_font.install(self)
         self.reload_forms()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -237,7 +267,7 @@ class App(tk.Tk):
                background=[("selected", CARD)],
                foreground=[("selected", ACCENT)],
                padding=[("selected", (26, 10))],
-               font=[("selected", ("Malgun Gothic", 11, "bold"))],
+               font=[("selected", font(11, "bold"))],
                expand=[("selected", (2, 4, 2, 0))])
         st.configure("TCombobox", fieldbackground=CARD, background=CARD, bordercolor=BORDER,
                      arrowcolor=TEXT, padding=4)
@@ -258,9 +288,9 @@ class App(tk.Tk):
         hdr = tk.Frame(self, bg=HEADER, height=52)
         hdr.pack(fill="x")
         tk.Label(hdr, text=APP_NAME, bg=HEADER, fg="#ffffff",
-                 font=("Malgun Gothic", 16, "bold")).pack(side="left", padx=(20, 4), pady=10)
+                 font=font(16, "bold")).pack(side="left", padx=(20, 4), pady=10)
         tk.Label(hdr, text=APP_NAME_EN, bg=HEADER, fg="#ffffff",
-                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=(0, 12), pady=(12, 8))
+                 font=(EN_FAMILY, 13 + FONT_PLUS, "bold")).pack(side="left", padx=(0, 12), pady=(12, 8))
         self._status = tk.StringVar(value="준비")
         tk.Label(hdr, textvariable=self._status, bg=HEADER, fg="#d6e4ff", font=FONT).pack(side="right", padx=20)
         self._progress = ttk.Progressbar(self, mode="indeterminate", style="Horizontal.TProgressbar")
@@ -357,7 +387,7 @@ class App(tk.Tk):
 
         # 버튼과 참고 자료를 아래에 먼저 고정해야, 창이 작아질 때 요청 입력칸만 줄어든다
         self._gen_btn = button(left, "문서 생성", self._on_generate, "primary")
-        self._gen_btn.configure(pady=10, font=("Malgun Gothic", 11, "bold"))
+        self._gen_btn.configure(pady=10, font=font(11, "bold"))
         self._gen_btn.pack(side="bottom", fill="x", pady=(12, 0))
         c3 = self.card(left, "3. 참고 자료 (선택)")
         c3.pack(side="bottom", fill="x", pady=(10, 0))
@@ -565,7 +595,7 @@ class App(tk.Tk):
         self._start_editing(out, "문서가 완성되었습니다. 고칠 부분이 있으면 말씀해주세요."
                                  + ("\n수정하면 저장된 파일에도 바로 반영됩니다." if self._saved_path else ""))
         if self.s.get("open_after_save") and self._saved_path:
-            os.startfile(self._saved_path)
+            open_path(self._saved_path)
         self.preview_file(self.gen_preview, self._saved_path or out)
 
     def _default_save_path(self, title):
@@ -596,17 +626,17 @@ class App(tk.Tk):
             self._saved_path = self._save_to(path)
             self.status(f"저장됨: {self._saved_path}")
             if self.s.get("open_after_save"):
-                os.startfile(self._saved_path)
+                open_path(self._saved_path)
 
     def _open_result(self):
         target = self._saved_path or self._result_path
         if target:
-            os.startfile(target)
+            open_path(target)
 
     def _open_result_folder(self):
         target = self._saved_path or self._result_path
         if target:
-            os.startfile(str(Path(target).parent))
+            open_path(str(Path(target).parent))
 
     # ── AI 수정 대화 ──
     def _build_chat(self, parent):
@@ -797,7 +827,7 @@ class App(tk.Tk):
         if not self.s.get("auto_preview", True):
             pane.show_message("자동 미리보기가 꺼져 있습니다 (설정).")
             return
-        pane.show_message("한글로 쪽 이미지를 만드는 중…")
+        pane.show_message("한글로 쪽 이미지를 만드는 중…" if IS_WIN else "미리보기를 여는 중…")
         pane._pending = path
 
         def done(pages, err):
@@ -805,7 +835,8 @@ class App(tk.Tk):
                 if getattr(pane, "_pending", None) != path:
                     return
                 if pages:
-                    pane.show_pages(pages, "(첫 쪽만 — 한글 미설치)" if err else "")
+                    pane.show_pages(pages, ("(첫 쪽만 — 한글 미설치)" if IS_WIN else "(첫 쪽만 — 맥에서는 첫 쪽만 보입니다)")
+                                    if err else "")
                 else:
                     pane.show_message(err or "미리보기를 만들 수 없습니다.")
             self.after(0, apply)
@@ -890,6 +921,10 @@ class App(tk.Tk):
         self.status(f"양식 {len(paths)}개 추가됨")
 
     def _convert_hwp(self, src, on_done, out_dir: Path | None = None):
+        if not IS_WIN:
+            messagebox.showerror("변환 불가", "HWP 파일을 HWPX로 바꾸는 기능은 윈도우용 한글이 있어야 합니다.\n"
+                                          "맥용 한글에서 [다른 이름으로 저장 → HWPX]로 바꾼 뒤 추가해 주세요.")
+            return
         out_dir = out_dir or CACHE_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         out = str(out_dir / (Path(src).stem + ".hwpx"))
@@ -935,7 +970,7 @@ class App(tk.Tk):
     def _open_forms_dir(self):
         d = Path(self.s["user_forms_dir"])
         d.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(d))
+        open_path(str(d))
 
     # ══ 설정 탭 ════════════════════════════════════════════════════════════
     def _build_cfg(self):
@@ -951,7 +986,7 @@ class App(tk.Tk):
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=min(e.width, 900)))
         canvas.bind("<Enter>", lambda e: canvas.bind_all(
-            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120) * 3, "units")))
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(wheel_units(ev), "units")))
         canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
         self._vars: dict[str, tk.Variable] = {}
 
@@ -1024,21 +1059,22 @@ class App(tk.Tk):
         self._spin(c, "해상도 (DPI)", "preview_dpi", 72, 200, 12)
         self._spin(c, "기본 확대율 (%)", "preview_zoom", 30, 250, 10, last=True)
 
-        # 한글 보안 모듈
-        import hwp_security
-        c = self.card(inner, "한글 '접근 허용' 경고 없애기")
-        c.pack(fill="x", padx=24, pady=(14, 0))
-        tk.Label(c, text="한컴 디벨로퍼 사이트(한글 오토메이션 → 보안 승인 모듈)에서 받은 DLL 파일을 선택하면\n"
-                         "등록되어, 미리보기·저장 때 뜨던 '접근 허용' 창이 더 이상 나오지 않습니다.",
-                 bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
-        row = tk.Frame(c, bg=CARD)
-        row.pack(fill="x", padx=14, pady=(8, 12))
-        ok, msg = hwp_security.status()
-        self._sec_var = tk.StringVar(value=("✓ " if ok else "✗ ") + msg)
-        self._sec_lbl = tk.Label(row, textvariable=self._sec_var, bg=CARD, font=FONT,
-                                 fg="#067647" if ok else DANGER)
-        self._sec_lbl.pack(side="left")
-        button(row, "DLL 선택…", self._install_security_dll).pack(side="right")
+        # 한글 보안 모듈 (윈도우용 한글 COM 전용)
+        if IS_WIN:
+            import hwp_security
+            c = self.card(inner, "한글 '접근 허용' 경고 없애기")
+            c.pack(fill="x", padx=24, pady=(14, 0))
+            tk.Label(c, text="한컴 디벨로퍼 사이트(한글 오토메이션 → 보안 승인 모듈)에서 받은 DLL 파일을 선택하면\n"
+                             "등록되어, 미리보기·저장 때 뜨던 '접근 허용' 창이 더 이상 나오지 않습니다.",
+                     bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
+            row = tk.Frame(c, bg=CARD)
+            row.pack(fill="x", padx=14, pady=(8, 12))
+            ok, msg = hwp_security.status()
+            self._sec_var = tk.StringVar(value=("✓ " if ok else "✗ ") + msg)
+            self._sec_lbl = tk.Label(row, textvariable=self._sec_var, bg=CARD, font=FONT,
+                                     fg="#067647" if ok else DANGER)
+            self._sec_lbl.pack(side="left")
+            button(row, "DLL 선택…", self._install_security_dll).pack(side="right")
 
         # 고급
         c = self.card(inner, "AI 고급 옵션")
@@ -1067,6 +1103,16 @@ class App(tk.Tk):
                   "로그인: 설치 후  codex  를 한 번 실행해 'ChatGPT로 로그인' 선택"),
     }
 
+    if IS_MAC:
+        CLI_GUIDE = {
+            "claude_code": ("Claude Pro/Max 구독이 있으면 사용할 수 있습니다.",
+                            "설치: 터미널에서  curl -fsSL https://claude.ai/install.sh | bash\n"
+                            "로그인: 설치 후 터미널에서  claude  를 한 번 실행해 로그인"),
+            "codex": ("ChatGPT Plus/Pro 구독이 있으면 사용할 수 있습니다.",
+                      "설치: 터미널에서  brew install codex  (또는 npm install -g @openai/codex)\n"
+                      "로그인: 설치 후  codex  를 한 번 실행해 'ChatGPT로 로그인' 선택"),
+        }
+
     def _build_cli_card(self, inner):
         import llm
         c = self.card(inner, "API 키 없이 쓰기 — 구독 계정 연결")
@@ -1089,7 +1135,7 @@ class App(tk.Tk):
 
             desc, how = self.CLI_GUIDE[pid]
             tk.Label(box, text=desc, bg=CARD, fg=TEXT, font=FONT_SM).pack(anchor="w", padx=12)
-            tk.Label(box, text=how, bg=CARD, fg=MUTED, font=("Consolas", 9), justify="left"
+            tk.Label(box, text=how, bg=CARD, fg=MUTED, font=(MONO_FAMILY, 9 + FONT_PLUS), justify="left"
                      ).pack(anchor="w", padx=12, pady=(2, 4))
 
             row = tk.Frame(box, bg=CARD)
@@ -1101,7 +1147,8 @@ class App(tk.Tk):
                      highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT
                      ).pack(side="left", fill="x", expand=True, ipady=3)
             button(row, "찾기…", lambda v=pv: (lambda f: f and v.set(f))(filedialog.askopenfilename(
-                title="실행 파일 선택", filetypes=[("실행 파일", "*.exe *.cmd"), ("모든 파일", "*.*")]))
+                title="실행 파일 선택",
+                filetypes=[("실행 파일", "*.exe *.cmd"), ("모든 파일", "*.*")] if IS_WIN else [("모든 파일", "*")]))
                    ).pack(side="left", padx=(6, 0))
             tk.Label(row, text="모델", bg=CARD, fg=TEXT, font=FONT_SM).pack(side="left", padx=(12, 4))
             mv = tk.StringVar(value=self.s["models"].get(pid, ""))
@@ -1151,7 +1198,7 @@ class App(tk.Tk):
         lab.pack_propagate(False)
         tk.Label(lab, text=label, bg=CARD, fg=TEXT, font=FONT).pack(anchor="w")
         if hint:
-            tk.Label(lab, text=hint, bg=CARD, fg=MUTED, font=("Malgun Gothic", 8),
+            tk.Label(lab, text=hint, bg=CARD, fg=MUTED, font=font(8),
                      wraplength=190, justify="left").pack(anchor="w")
             lab.configure(height=40)
         else:

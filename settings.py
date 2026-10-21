@@ -1,4 +1,5 @@
-"""사용자 설정 (%APPDATA%\\HWP_AI_Writer\\settings.json)에 저장되어 재시작 후에도 유지된다."""
+"""사용자 설정 (%APPDATA%\\HWP_AI_Writer\\settings.json, 맥은 ~/Library/Application Support/HWP_AI_Writer)에
+저장되어 재시작 후에도 유지된다."""
 import copy
 import json
 import os
@@ -8,7 +9,10 @@ from pathlib import Path
 
 APP_VERSION = "1.0.0"
 
-APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "HWP_AI_Writer"
+if sys.platform == "darwin":
+    APP_DIR = Path.home() / "Library" / "Application Support" / "HWP_AI_Writer"
+else:
+    APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "HWP_AI_Writer"
 SETTINGS_FILE = APP_DIR / "settings.json"
 # 한글은 AppData\Roaming 아래로는 쪽 이미지를 쓰지 못하므로 Temp를 사용
 CACHE_DIR = Path(tempfile.gettempdir()) / "HWP_AI_Writer"

@@ -1,0 +1,120 @@
+# 윈도우 설치 파일(.exe)과 맥 설치 파일(.dmg)을 GitHub 서버에서 빌드한다.
+# PyInstaller는 교차 빌드가 안 되므로 각 운영체제 러너에서 따로 만든다.
+#  - main에 합쳐지면 settings.py의 APP_VERSION으로 릴리스(v1.0.0 등)를 만들어
+#    Releases 페이지에 exe·dmg를 바로 올린다 (같은 버전이면 파일만 새로 덮어씀)
+#  - 다른 브랜치는 빌드만 하고, Actions 실행 화면 아래 Artifacts에 남긴다
+name: Build installers
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "**.py"
+      - "forms/**"
+      - "assets/**"
+      - "installer/**"
+      - "requirements.txt"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build exe + installer
+        run: python build_installer.py
+      - name: Smoke test
+        run: python tools/smoke_test.py dist\HanQ\HanQ.exe 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HanQ-windows
+          path: installer_output/*.exe
+          if-no-files-found: error
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest      # Apple Silicon (M1~)
+            arch: arm64
+          - runner: macos-15-intel    # Intel 맥
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build app + dmg
+        run: python build_installer.py
+      - name: Smoke test
+        run: python tools/smoke_test.py dist/HanQ.app/Contents/MacOS/HanQ 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HanQ-mac-${{ matrix.arch }}
+          path: installer_output/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: ver
+        run: echo "version=$(python3 -c "import settings; print(settings.APP_VERSION)")" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: 한큐 HanQ ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          overwrite_files: true
+          files: out/*
+          body: |
+            ## 내려받기
+            아래 **Assets**에서 내 컴퓨터에 맞는 파일 하나만 받으세요.
+
+            | 컴퓨터 | 파일 |
+            |---|---|
+            | 윈도우 | `HanQ_Setup_${{ steps.ver.outputs.version }}.exe` |
+            | 맥 (M1·M2·M3·M4 칩) | `HanQ_${{ steps.ver.outputs.version }}_mac_arm64.dmg` |
+            | 맥 (Intel 칩) | `HanQ_${{ steps.ver.outputs.version }}_mac_x86_64.dmg` |
+
+            맥 칩 확인: 화면 왼쪽 위 사과 메뉴 → 이 Mac에 관하여 → '칩'
+
+            ## 맥에서 처음 실행
+            1. dmg를 열고 HanQ를 Applications 폴더로 끌어다 놓기
+            2. 처음 열 때 경고가 뜨면 **시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기**
+               (또는 터미널에서 `xattr -cr /Applications/HanQ.app` 한 번 실행)

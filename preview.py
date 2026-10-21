@@ -1,7 +1,7 @@
 """한글(HWP) COM으로 문서 각 쪽을 이미지로 내보내 미리보기를 만든다.
 
 한글 인스턴스 하나를 전용 스레드에서 숨긴 채로 유지해 반복 미리보기를 빠르게 한다.
-한글이 없으면 hwpx 안의 미리보기 이미지(첫 쪽)로 대신한다.
+한글이 없거나 맥이면(한글 COM 없음) hwpx 안의 미리보기 이미지(첫 쪽)로 대신한다.
 """
 import hashlib
 import os
@@ -49,8 +49,11 @@ class Renderer:
         self._q.put(None)
 
     def _loop(self):
-        import pythoncom
-        pythoncom.CoInitialize()
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except ImportError:  # 맥
+            pythoncom = None
         hwp = None
         try:
             while True:
@@ -88,11 +91,12 @@ class Renderer:
                     hwp.Quit()
                 except Exception:
                     pass
-            pythoncom.CoUninitialize()
+            if pythoncom is not None:
+                pythoncom.CoUninitialize()
 
     def _start_hwp(self):
-        import win32com.client
         try:
+            import win32com.client
             hwp = win32com.client.DispatchEx("HWPFrame.HwpObject")
         except Exception:
             self.available = False
