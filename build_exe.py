@@ -37,6 +37,11 @@ def main():
     shutil.rmtree(dist, ignore_errors=True)
     shutil.rmtree(build, ignore_errors=True)
 
+    # rhwp(한글 없이 미리보기·HWP 변환, MIT) 실행 파일을 받아 함께 묶는다. 실패해도 빌드는 계속 (간이 미리보기로 동작)
+    rhwp_ok = subprocess.run([sys.executable, str(HERE / "tools" / "fetch_rhwp.py")], cwd=HERE).returncode == 0
+    if not rhwp_ok:
+        print("경고: rhwp를 받지 못해 빼고 빌드합니다.")
+
     # --add-data의 구분자는 윈도우 ';', 맥 ':'
     sep = os.pathsep
     # 맥은 png를 주면 PyInstaller가 Pillow로 icns를 만든다
@@ -47,6 +52,8 @@ def main():
         f"--distpath={dist}", f"--workpath={build}", f"--specpath={build}",
         "--add-data", f"{HERE / 'forms'}{sep}forms",
         "--add-data", f"{HERE / 'assets' / 'icon.ico'}{sep}assets",
+        "--add-data", f"{HERE / 'THIRD_PARTY_NOTICES.md'}{sep}.",
+        *(["--add-data", f"{HERE / 'tools' / 'rhwp'}{sep}tools/rhwp"] if rhwp_ok else []),
         f"--icon={icon}",
         "--hidden-import", "PIL.ImageTk",
         # 예전 RAG 버전의 무거운 라이브러리가 끌려 들어가지 않게 제외

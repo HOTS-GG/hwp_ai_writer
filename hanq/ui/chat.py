@@ -152,7 +152,6 @@ class ChatPanel:
         out = ws.next_path()
         history = list(self.history)
         self.history.append(("user", text))
-        dpi = int(app.s.get("preview_dpi", 96))
         sees = bool(app.s.get("ai_sees_screen", True))
 
         def work(job):
@@ -160,12 +159,12 @@ class ChatPanel:
             page_info = None
             if sees:
                 job.status("한글 화면 읽는 중…")
-                page_info = app.worker.page_info(src, dpi)
+                page_info = app.page_info(src)
             res = edit_document(job, src, out, text, history, ai, page_info=page_info, refs=refs)
             # 결과 확인: 고친 문서를 한글로 다시 열어 쪽 수를 센다
             if page_info and page_info[1] and res.changed:
                 job.status("결과 확인 중…")
-                _, after = app.worker.page_info(out, dpi)
+                _, after = app.page_info(out)
                 if after:
                     res.pages = (page_info[1].get("pages"), after.get("pages"))
             return res

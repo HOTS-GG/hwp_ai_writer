@@ -13,7 +13,7 @@ from .document import HwpxDocument
 from .outline import Outline, TableGroup
 from .xml import (P, ROMAN, RUN, SUBLIST, T, TBL, TC, TEXT_PATH, TR, build_table_paragraph, cell_text, clone_line,
                   drop_if_empty, has_objects, has_secpr, heading_parts, is_blank, is_simple_table_para, leading_ws,
-                  marker_of, new_id, para_text, renumber_table, set_cell, set_para_text, set_t, strip_lineseg,
+                  mark_changed, marker_of, new_id, para_text, renumber_table, set_cell, set_para_text, set_t, strip_lineseg,
                   t_text, top_para)
 
 STYLE_KEYS = ("color", "background", "size", "bold", "italic", "underline")
@@ -169,6 +169,7 @@ class Editor:
             tbl.insert(anchor_idx + k, tr)
         g.trs = new_trs
         renumber_table(tbl)
+        mark_changed(top_para(tbl))   # 표 높이가 바뀌었다
 
     # ── 한 번에 반영 ────────────────────────────────────────────────────
     def apply(self, plan: EditPlan) -> ApplyReport:
@@ -378,6 +379,7 @@ class Editor:
     def apply_style(self, t, style: dict, part: str | None = None) -> bool:
         """글자 조각(t) 전체, 또는 그 안의 일부 글자(part)에 글자 모양을 적용한다."""
         run = t.getparent()
+        mark_changed(run.getparent())    # 글자 크기 등이 바뀌면 줄 배치가 달라진다
         base = run.get("charPrIDRef", "0")
         new_id = self.doc.charpr_variant(base, style)
         text = t_text(t)
@@ -433,6 +435,7 @@ class Editor:
                         done = True
             for p in ps:
                 if para and p.getparent() is not None:
+                    mark_changed(p)
                     p.set("paraPrIDRef", self.doc.parapr_variant(p.get("paraPrIDRef", "0"), para))
                     done = True
                 if "page_break" in st:

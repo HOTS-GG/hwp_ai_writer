@@ -21,7 +21,8 @@ class PreviewPane(tk.Frame):
         self._text = None
         self._message = None
         self._focus = None              # (쪽, y px)
-        self.token = None               # 지금 보여주는 실시간 작업 번호
+        self.token = None               # 지금 보여줄 그리기 요청 번호
+        self.keep_token = None          # 마지막으로 그린 요청 (같은 요청이면 스크롤 유지)
 
         bar = tk.Frame(self, bg=BG)
         bar.pack(fill="x", pady=(0, 6))

@@ -72,8 +72,15 @@ class SettingsTab:
         tk.Frame(c, bg=CARD, height=8).pack()
 
         c = self._card(inner, "미리보기")
-        self._check(c, "AI가 쓰는 대로 실시간으로 보기 (빠른 미리보기)", "live_preview")
-        self._check(c, "다 쓴 뒤 한글로 정확한 쪽 이미지 다시 그리기 (윈도우 한글 필요)", "auto_preview")
+        if app.rhwp is not None:
+            engine = f"✓ rhwp 사용 중 — 한글 없이 실제 모양으로 그립니다 ({app.rhwp.exe})"
+        else:
+            engine = "rhwp 없음 — 간이 미리보기를 쓰고, 한글이 있으면 한글로 다시 그립니다"
+        tk.Label(c, text=engine, bg=CARD, fg=OK if app.rhwp else MUTED, font=FONT_SM, justify="left",
+                 wraplength=760).pack(anchor="w", padx=14, pady=(0, 4))
+        self._entry(c, "rhwp 실행 파일", "rhwp_path", "비워 두면 자동으로 찾음 (바꾸면 다시 시작해야 적용)")
+        self._check(c, "AI가 쓰는 대로 실시간으로 보기", "live_preview")
+        self._check(c, "rhwp가 없을 때: 다 쓴 뒤 한글로 정확한 쪽 이미지 다시 그리기 (윈도우 한글 필요)", "auto_preview")
         self._spin(c, "해상도 (DPI)", "preview_dpi", 72, 200, 12)
         self._spin(c, "기본 확대율 (%)", "preview_zoom", 30, 250, 10, last=True)
 

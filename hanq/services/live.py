@@ -1,25 +1,42 @@
-"""LiveView: 작업이 보낸 문서(hwpx 바이트)를 전용 스레드에서 간이 렌더러로 그린다.
+"""LiveView: 문서(hwpx 바이트나 파일)를 전용 스레드에서 쪽 이미지로 그린다.
 
-그리는 동안 새 문서가 오면 가장 최근 것만 그린다. 결과는 callback(RenderResult)으로 알린다
+rhwp가 있으면 rhwp로(실제 한글과 거의 같은 모양), 없으면 간이 렌더러로 그린다.
+작업이 보낸 문서에서 '방금 쓴 줄'(FOCUS_ATTR 표시)은 노란 음영으로 칠하고, 그 줄이 놓인 쪽·위치를 함께 알린다.
+그리는 동안 새 요청이 오면 가장 최근 것만 그린다. 결과는 callback(RenderResult, token)으로 알린다
 (작업 스레드에서 불리므로 UI는 after()로 넘겨 받아야 한다).
 """
 import queue
+import tempfile
 import threading
+from pathlib import Path
 
-from ..doc.render import render
+from ..doc.render import FOCUS_ATTR, FOCUS_FILL, RenderResult, render
+
+ENGINE_RHWP = "rhwp"
+ENGINE_SIMPLE = "simple"
 
 
 class LiveView:
-    def __init__(self, callback, dpi: int = 96):
+    def __init__(self, callback, dpi: int = 96, rhwp=None):
+        """rhwp: hanq.hwp.rhwp.Rhwp 또는 None(간이 렌더러만)."""
         self._cb = callback
-        self._dpi = dpi
+        self.dpi = dpi
+        self.rhwp = rhwp
         self._q: queue.Queue = queue.Queue()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
+    @property
+    def engine(self) -> str:
+        return ENGINE_RHWP if self.rhwp is not None else ENGINE_SIMPLE
+
     def submit(self, data: bytes, token=None):
-        """token은 그리는 요청을 구분하는 값(예: 작업 번호). 결과와 함께 그대로 돌려준다."""
-        self._q.put((data, token))
+        """메모리의 hwpx(실시간 화면). token은 요청 구분값으로 결과와 함께 돌려준다."""
+        self._q.put(("bytes", data, token))
+
+    def submit_file(self, path: str, token=None):
+        """파일(hwpx·hwp) 미리보기."""
+        self._q.put(("file", path, token))
 
     def close(self):
         self._q.put(None)
@@ -34,9 +51,61 @@ class LiveView:
                 if nxt is None:
                     return
                 job = nxt
-            data, token = job
+            kind, src, token = job
             try:
-                result = render(data, self._dpi)
-            except Exception:  # 그리기 실패는 화면만 건너뛴다 (문서 작업에는 영향 없음)
-                continue
+                result = self._render(kind, src)
+            except Exception:   # 그리기 실패는 화면만 건너뛴다 (문서 작업에는 영향 없음)
+                try:
+                    result = self._render_simple(kind, src)
+                except Exception:
+                    continue
             self._cb(result, token)
+
+    # ── 그리기 ──────────────────────────────────────────────────────────
+    def _render(self, kind: str, src):
+        if self.rhwp is None:
+            return self._render_simple(kind, src)
+        if kind == "file":
+            data = Path(src).read_bytes()
+            if not data.startswith(b"PK"):          # HWP 바이너리는 파일 그대로 그린다
+                from PIL import Image
+                with tempfile.TemporaryDirectory(prefix="hanq_rhwp_") as d:
+                    pages = []
+                    for p in self.rhwp.render_to_dir(src, Path(d), self.dpi):
+                        with Image.open(p) as im:
+                            pages.append(im.convert("RGB"))
+                return RenderResult(pages, None, None)
+            src = data
+        data, focus_key = _shade_focus(src)
+        pages, layout = self.rhwp.render_bytes(data, self.dpi, with_layout=focus_key is not None)
+        fp = fy = None
+        if focus_key is not None and layout is not None and focus_key in layout.pos:
+            fp, y96 = layout.pos[focus_key]
+            fy = int(y96 * self.dpi / 96)
+        return RenderResult(pages, fp, fy)
+
+    def _render_simple(self, kind: str, src):
+        if kind == "file" and not str(src).lower().endswith(".hwpx"):
+            raise ValueError("간이 렌더러는 HWPX만 그립니다.")
+        return render(src, self.dpi)
+
+
+def _shade_focus(data: bytes):
+    """FOCUS_ATTR가 붙은 줄을 노란 음영 글자로 바꾼 사본과, 첫 강조 줄의 (구역 번호, 본문 문단 번호).
+    강조할 줄이 없으면 (원래 바이트, None)."""
+    from ..doc import HwpxDocument
+    from ..doc.xml import P, RUN, top_para
+    doc = HwpxDocument.from_bytes(data)
+    focus_key = None
+    found = False
+    for sec_i, root in enumerate(doc.ordered_sections()):
+        for p in [p for p in root.iter(P) if p.get(FOCUS_ATTR)]:
+            found = True
+            del p.attrib[FOCUS_ATTR]
+            for run in p.iterfind(RUN):
+                run.set("charPrIDRef", doc.charpr_variant(run.get("charPrIDRef", "0"), {"background": FOCUS_FILL}))
+            if focus_key is None:
+                top = top_para(p)
+                if top is not None and top.getparent() is root:
+                    focus_key = (sec_i, list(root.iterchildren(P)).index(top))
+    return (doc.to_bytes() if found else data), focus_key

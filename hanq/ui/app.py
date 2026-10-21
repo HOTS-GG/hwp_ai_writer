@@ -70,8 +70,11 @@ class App(tk.Tk):
         self._busy_listeners = []
         self._forms_listeners = []
         self.worker = self._new_worker()
+        # rhwp(한글 없이 실제 모양으로 그리는 오픈소스 엔진)가 있으면 미리보기·HWP 변환에 쓴다
+        from ..hwp.rhwp import get_rhwp
+        self.rhwp = get_rhwp(self.s.get("rhwp_path", ""))
         self.live = LiveView(lambda result, token: self.after(0, self._on_live_frame, result, token),
-                             dpi=int(self.s.get("preview_dpi", 96)))
+                             dpi=int(self.s.get("preview_dpi", 96)), rhwp=self.rhwp)
         self._panes = []
 
         apply_ttk_style(self)
@@ -223,12 +226,19 @@ class App(tk.Tk):
         for pane in self._panes:
             if pane.token == token:
                 live_job = token[0] == "job"
-                pane.show_pages(result.pages, "실시간 미리보기" if live_job else "빠른 미리보기",
+                if live_job:
+                    note = "실시간 미리보기"
+                else:
+                    note = "" if self.rhwp else "빠른 미리보기 (실제 한글과 조금 다를 수 있음)"
+                pane.show_pages(result.pages, note,
                                 focus=(result.focus_page, result.focus_y) if live_job else None,
-                                keep_scroll=True)
+                                keep_scroll=token == pane.keep_token)
+                pane.keep_token = token
 
     def preview_file(self, pane, path: str, note: str = ""):
-        """빠른 미리보기(간이 렌더링)를 바로 보여주고, 한글이 있으면 정확한 쪽 이미지로 바꾼다."""
+        """문서 모양 미리보기 — 빠른 것부터 보여주고 더 정확한 것으로 바꾼다.
+          1) rhwp(있으면, 실제 한글과 거의 같음) 또는 간이 렌더링을 바로
+          2) 윈도우 한글이 있고 설정이 켜져 있으면 한글이 직접 그린 쪽 이미지로 교체 (가장 정확)"""
         token = ("file", next(_tokens))
         pane.token = token
         if path.lower().endswith(".pdf"):
@@ -239,15 +249,17 @@ class App(tk.Tk):
                 pane.show_message(f"PDF를 읽을 수 없습니다: {e}")
             return
         is_hwpx = path.lower().endswith(".hwpx")
-        if is_hwpx:
+        first = None
+        if self.rhwp is not None:
+            self.live.submit_file(path, token)
+        elif is_hwpx:
             try:
                 self.live.submit(Path(path).read_bytes(), token)
             except OSError as e:
                 pane.show_message(f"파일을 읽을 수 없습니다: {e}")
                 return
-        # HWP: 파일 안에 한글이 넣어 둔 첫 쪽 그림을 먼저 보여준다 (한글 없이도 실제 모양)
-        first = None
-        if not is_hwpx:
+        else:
+            # HWP: 파일 안에 한글이 넣어 둔 첫 쪽 그림을 먼저 보여준다 (한글 없이도 실제 모양)
             from ..readers.hwp import preview_image
             first = preview_image(path)
             if first is not None:
@@ -255,7 +267,7 @@ class App(tk.Tk):
             else:
                 pane.show_message("한글로 쪽 이미지를 만드는 중…")
         if not (IS_WIN and self.s.get("auto_preview", True)):
-            if not is_hwpx and first is None:
+            if not is_hwpx and first is None and self.rhwp is None:
                 self._show_text_instead(pane, path, "HWP 문서 모양 미리보기는 윈도우용 한글이 있어야 합니다")
             return
         pane.set_note("한글로 정확한 미리보기 만드는 중…")
@@ -269,7 +281,9 @@ class App(tk.Tk):
                     pane.show_pages(pages, note or "", keep_scroll=True)
                 elif err:
                     self.status(err[:120])
-                    if is_hwpx:
+                    if self.rhwp is not None:
+                        pane.set_note("rhwp 미리보기 (한글과 조금 다를 수 있음)")
+                    elif is_hwpx:
                         pane.set_note("빠른 미리보기 (실제 한글 화면과 조금 다를 수 있음)")
                     elif first is not None:
                         pane.set_note("첫 쪽만 표시 — 전체 내용은 [AI에 보낼 글]")
@@ -290,7 +304,23 @@ class App(tk.Tk):
 
     # ── 한글 변환 ───────────────────────────────────────────────────────
     def convert_hwp(self, src: str, on_done, out_dir: Path | None = None):
-        """HWP를 HWPX로 바꾼 뒤 on_done(hwpx 경로)."""
+        """HWP를 HWPX로 바꾼 뒤 on_done(hwpx 경로). rhwp가 있으면 한글 없이 바꾼다."""
+        out_dir = out_dir or CACHE_DIR
+        if self.rhwp is not None:
+            out = str(out_dir / (Path(src).stem + ".hwpx"))
+            self.status("HWP → HWPX 변환 중…")
+
+            def run():
+                try:
+                    self.rhwp.to_hwpx(src, out)
+                except Exception as e:
+                    err = str(e)
+                    self.after(0, lambda: (self.status("변환 실패"),
+                                           messagebox.showerror("변환 실패", f"HWP 파일을 HWPX로 바꾸지 못했습니다.\n\n{err}")))
+                    return
+                self.after(0, lambda: (self.status("변환 완료"), on_done(out)))
+            threading.Thread(target=run, daemon=True).start()
+            return
         if not IS_WIN:
             messagebox.showerror("변환 불가", "HWP 파일을 HWPX로 바꾸는 기능은 윈도우용 한글이 있어야 합니다.\n"
                                           "맥용 한글에서 [다른 이름으로 저장 → HWPX]로 바꾼 뒤 사용해 주세요.")
@@ -309,6 +339,23 @@ class App(tk.Tk):
                     messagebox.showerror("변환 실패", f"HWP 파일을 HWPX로 바꾸려면 한글 프로그램이 필요합니다.\n\n{err}")
             self.after(0, apply)
         self.worker.convert(src, out, "HWPX", done)
+
+    def page_info(self, path: str):
+        """AI에게 보여줄 (쪽 이미지 경로 목록, {"paras": 본문 줄별 시작 쪽, "pages": 쪽 수}). 작업 스레드에서 부른다.
+        rhwp가 있으면 rhwp로, 없으면 한글로. 둘 다 안 되면 ([], None)."""
+        dpi = int(self.s.get("preview_dpi", 96))
+        if self.rhwp is None:
+            return self.worker.page_info(path, dpi)
+        try:
+            from ..doc import HwpxDocument
+            from ..doc.xml import P
+            from ..hwp.worker import _key
+            pages = self.rhwp.render_to_dir(path, CACHE_DIR / ("rhwp_" + _key(path, dpi)), dpi)
+            layout = self.rhwp.layout(path)
+            counts = [sum(1 for _ in root.iterchildren(P)) for root in HwpxDocument(path).ordered_sections()]
+            return pages, {"paras": layout.para_pages(counts), "pages": layout.pages}
+        except Exception:
+            return [], None
 
     # ── 설정 ────────────────────────────────────────────────────────────
     def set(self, key, value):

@@ -6,7 +6,7 @@ import zipfile
 
 from lxml import etree
 
-from .xml import ALIGNS, P, RUN, SUBLIST, T, TBL, TC, TR, cell_text, hex_color, hh, para_text, strip_lineseg
+from .xml import ALIGNS, P, RUN, SUBLIST, T, TBL, TC, TR, cell_text, hex_color, hh, para_text
 
 HEADER_NAME = "Contents/header.xml"
 SECTION_RE = re.compile(r"^Contents/section\d+\.xml$")
@@ -45,8 +45,8 @@ class HwpxDocument:
             for info, data in self._items:
                 name = info.filename
                 if name in self.sections:
+                    # 줄 배치 정보는 바뀐 문단에서만 지운다 (xml.mark_changed) — 나머지는 원본 그대로
                     root = self.sections[name]
-                    strip_lineseg(root)
                     data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
                 elif name == HEADER_NAME and self._header is not None:
                     data = etree.tostring(self._header, xml_declaration=True, encoding="UTF-8", standalone=True)

@@ -9,3 +9,4 @@ rag/
 .env
 installer_output/
 installer/안내.txt
+tools/rhwp/

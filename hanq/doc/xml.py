@@ -86,9 +86,23 @@ def t_text(t) -> str:
 
 
 def set_t(t, text: str):
+    if t_text(t) == text and not len(t):
+        return
     for c in list(t):
         t.remove(c)
     t.text = text
+    run = t.getparent()
+    if run is not None and run.getparent() is not None:
+        mark_changed(run.getparent())
+
+
+def mark_changed(p):
+    """글자·모양이 바뀐 문단: 그 문단의 줄 배치 정보만 지워 한글·rhwp가 다시 계산하게 한다.
+    (바뀌지 않은 문단의 줄 배치는 원본 그대로 둬야 도형·글상자 위치가 원본과 같게 나온다)"""
+    if p is None or p.tag != P:
+        return
+    for ls in p.findall(LINESEG):
+        p.remove(ls)
 
 
 def ensure_t(p):
