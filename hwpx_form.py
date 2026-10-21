@@ -216,6 +216,8 @@ class HwpxDoc:
         self._header = None
         self._charpr_cache: dict = {}
         self._parapr_cache: dict = {}
+        self._border_cache: dict = {}
+        self.boxes: dict[str, object] = {}
         self.headings: dict[str, object] = {}
         self.images: dict[str, object] = {}
         self.slots: dict[str, object] = {}
@@ -268,6 +270,7 @@ class HwpxDoc:
         self.tables.clear()
         self.headings.clear()
         self.images.clear()
+        self.boxes.clear()
         self._outline = []
         self.edit_mode = edit
         all_text = self.plain_text()
@@ -405,6 +408,13 @@ class HwpxDoc:
     def _table(self, tbl, prefix):
         trs = tbl.findall(TR)
         ncols = int(tbl.get("colCnt", "0") or 0)
+        holder = tbl.getparent().getparent() if tbl.getparent() is not None else None
+        hp_ = heading_parts(holder) if holder is not None and holder.tag == P else None
+        if self.edit_mode and not (hp_ and hp_[0] is tbl):
+            # 수정 모드: 장 제목 상자를 뺀 모든 표를 B번호로 내놓아 표 틀 지우기·테두리 바꾸기에 쓴다
+            bid = f"B{len(self.boxes) + 1}"
+            self.boxes[bid] = tbl
+            self._outline.append(f"{prefix}[{bid}] 표 ({len(trs)}행 {ncols}열) ↓")
         i = 0
         while i < len(trs):
             if i >= 1 and self._is_data_row(trs[i], ncols):
@@ -433,7 +443,7 @@ class HwpxDoc:
     # ── 채우기 ──────────────────────────────────────────────────────────
     def fill(self, slots: dict, tables: dict, new_sections: list | None = None,
              inserts: list | None = None, styles: list | None = None, deletes: list | None = None,
-             moves: list | None = None, replace_all: list | None = None) -> dict:
+             moves: list | None = None, replace_all: list | None = None, unwraps: list | None = None) -> dict:
         sequential = self._headings_sequential()
         hs = self._all_headings()
         start = HwpxDoc._cell_text(hs[0][1][1]).strip() if hs else None
@@ -442,12 +452,98 @@ class HwpxDoc:
         inserted = self.insert_lines(inserts or [])
         styled = self.apply_styles(styles or [])
         moved = self.move_blocks(moves or [])
+        unwrapped = self.unwrap_tables(unwraps or [])
         deleted = self.delete_blocks(deletes or [])
         added = self.insert_sections(new_sections or [])
         if (added or deleted or moved) and sequential and self._all_headings():
             self._renumber_headings(start)
         return {"styled": styled, "inserted": inserted, "sections": added, "deleted": deleted,
-                "moved": moved, "replaced": replaced}
+                "moved": moved, "replaced": replaced, "unwrapped": unwrapped}
+
+    # ── 표 틀만 없애기 / 테두리 ─────────────────────────────────────────
+    def _table_of(self, ref: str):
+        ref = str(ref).strip()
+        if ref in self.boxes:
+            return self.boxes[ref]
+        return self.tables[ref].tbl if ref in self.tables else None
+
+    def unwrap_tables(self, refs: list) -> int:
+        """표 틀을 없애고 칸 안의 글(문단)은 표가 있던 자리에 차례로 남긴다."""
+        n = 0
+        for ref in refs:
+            tbl = self._table_of(ref)
+            run = tbl.getparent() if tbl is not None else None
+            p = run.getparent() if run is not None else None
+            if p is None or p.getparent() is None:
+                continue
+            paras = []
+            for tr in tbl.iterfind(TR):
+                cells = []
+                for tc in tr.iterfind(TC):
+                    sl = tc.find(SUBLIST)
+                    cells.append([cp for cp in (sl.iterfind(P) if sl is not None else [])
+                                  if _para_text(cp).strip() or _has_objects(cp)])
+                filled = [c for c in cells if c]
+                if len(filled) >= 2 and all(len(c) == 1 and not _has_objects(c[0]) for c in filled):
+                    # 한 줄짜리 칸들은 한 줄로: 2칸이면 "항목: 내용", 그 이상이면 " / "로 잇는다
+                    texts = [_para_text(c[0]).strip() for c in filled]
+                    line = f"{texts[0]}: {texts[1]}" if len(texts) == 2 else " / ".join(texts)
+                    np_ = copy.deepcopy(filled[-1][0])
+                    ts = list(np_.iter(T))
+                    set_t(ts[0], line)
+                    for t in ts[1:]:
+                        set_t(t, "")
+                    paras.append(np_)
+                    continue
+                for c in filled:
+                    paras.extend(copy.deepcopy(cp) for cp in c)
+            anchor = p
+            for np_ in paras:
+                for ls in list(np_.iter(LINESEG)):
+                    ls.getparent().remove(ls)
+                np_.set("id", "0")
+                anchor.addnext(np_)
+                anchor = np_
+            run.remove(tbl)
+            if not _has_objects(p) and not _para_text(p).strip():
+                self._drop_if_empty(p)
+            n += 1
+        return n
+
+    def _borderfill_variant(self, base_id: str, on: bool) -> str:
+        key = (base_id, on)
+        if key in self._border_cache:
+            return self._border_cache[key]
+        hdr = self._header_root()
+        props = hdr.find(f".//{{{HH}}}borderFills")
+        items = props.findall(f"{{{HH}}}borderFill")
+        base = next((b for b in items if b.get("id") == base_id), items[0])
+        bf = copy.deepcopy(base)
+        new_id = str(max(int(b.get("id")) for b in items) + 1)
+        bf.set("id", new_id)
+        for side in ("leftBorder", "rightBorder", "topBorder", "bottomBorder"):
+            e = bf.find(f"{{{HH}}}{side}")
+            if e is None:
+                continue
+            e.set("type", "SOLID" if on else "NONE")
+            if on and e.get("width", "").startswith("0.1 "):
+                e.set("width", "0.12 mm")
+        props.append(bf)
+        props.set("itemCnt", str(len(items) + 1))
+        self._border_cache[key] = new_id
+        return new_id
+
+    def set_table_border(self, ref: str, on: bool) -> bool:
+        """표의 테두리 선을 모두 없애거나(on=False) 실선으로 그린다. 칸 배경색은 그대로."""
+        tbl = self._table_of(ref)
+        if tbl is None:
+            return False
+        if tbl.get("borderFillIDRef"):
+            tbl.set("borderFillIDRef", self._borderfill_variant(tbl.get("borderFillIDRef"), on))
+        for tr in tbl.iterfind(TR):
+            for tc in tr.iterfind(TC):
+                tc.set("borderFillIDRef", self._borderfill_variant(tc.get("borderFillIDRef", "1"), on))
+        return True
 
     # ── 문서 전체 찾아 바꾸기 ────────────────────────────────────────────
     def replace_everywhere(self, pairs: list) -> int:
@@ -496,8 +592,9 @@ class HwpxDoc:
         ref = str(ref).strip()
         if ref in self.headings:
             return self._section_block(self.headings[ref])
-        el = (self.tables[ref].tbl if ref in self.tables else self.images.get(ref)
-              or (self.slots[ref] if ref in self.slots else None))
+        el = next((m[ref] for m in (self.images, self.boxes, self.slots) if ref in m), None)
+        if ref in self.tables:
+            el = self.tables[ref].tbl
         p = self._top_para(el) if el is not None else None
         return [p] if p is not None and p.getparent() is not None else []
 
@@ -546,8 +643,9 @@ class HwpxDoc:
                     if v.find(f".//{SECPR}") is None and v.getparent() is not None:
                         v.getparent().remove(v)
                 removed += 1
-            elif ref in self.tables or ref in self.images:
-                obj = self.tables[ref].tbl if ref in self.tables else self.images[ref]
+            elif ref in self.tables or ref in self.images or ref in self.boxes:
+                obj = (self.tables[ref].tbl if ref in self.tables else
+                       self.images[ref] if ref in self.images else self.boxes[ref])
                 run = obj.getparent()
                 if run is None:
                     continue
@@ -682,6 +780,9 @@ class HwpxDoc:
                 hp = heading_parts(self.headings[target])
                 ts = list(hp[2].iter(T)) if hp else []
                 ps = [self.headings[target]]
+            if "border" in st and self._table_of(target) is not None:
+                n += self.set_table_border(target, bool(st["border"]))
+                continue
             style = {k: st[k] for k in ("color", "background", "size", "bold", "italic", "underline") if k in st}
             para = {k: st[k] for k in ("align", "line_spacing") if k in st}
             if style:
