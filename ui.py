@@ -835,8 +835,7 @@ class App(tk.Tk):
                 if getattr(pane, "_pending", None) != path:
                     return
                 if pages:
-                    pane.show_pages(pages, ("(첫 쪽만 — 한글 미설치)" if IS_WIN else "(첫 쪽만 — 맥에서는 첫 쪽만 보입니다)")
-                                    if err else "")
+                    pane.show_pages(pages, "(간이 미리보기 — 실제 한글 화면과 조금 다를 수 있음)" if err else "")
                 else:
                     pane.show_message(err or "미리보기를 만들 수 없습니다.")
             self.after(0, apply)

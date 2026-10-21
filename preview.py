@@ -83,7 +83,7 @@ class Renderer:
                         except Exception:
                             pass
                         hwp = None
-                    cb(self._fallback(path), f"한글 미리보기 실패: {e}")
+                    cb(self._fallback(path, dpi), f"한글 미리보기 실패: {e}")
         finally:
             if hwp is not None:
                 try:
@@ -165,13 +165,24 @@ class Renderer:
         except Exception:
             pass
 
-    @staticmethod
-    def _fallback(path: str) -> list[str]:
-        from hwpx_form import read_preview_png
-        data = read_preview_png(path) if path.lower().endswith(".hwpx") else None
-        if not data:
+    def _fallback(self, path: str, dpi: int) -> list[str]:
+        """한글이 없을 때(맥 등): 문서 내용을 직접 그린 간이 미리보기. 안 되면 hwpx에 든 미리보기 그림."""
+        if not path.lower().endswith(".hwpx"):
             return []
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        out = CACHE_DIR / (Path(path).stem + "_prv.png")
-        out.write_bytes(data)
-        return [str(out)]
+        d = CACHE_DIR / ("simple_" + self._key(path, dpi))
+        if (d / "done").exists():
+            return sorted(str(p) for p in d.glob("page_*.png"))
+        try:
+            from hwpx_render import render_pages
+            pages = render_pages(path, dpi, d)
+            (d / "done").write_text("ok")
+            return pages
+        except Exception:
+            from hwpx_form import read_preview_png
+            data = read_preview_png(path)
+            if not data:
+                return []
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            out = CACHE_DIR / (Path(path).stem + "_prv.png")
+            out.write_bytes(data)
+            return [str(out)]
