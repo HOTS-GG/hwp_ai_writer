@@ -263,3 +263,20 @@ class HwpReader:
 
 def read_hwp(path: str) -> str:
     return HwpReader(path).text()
+
+
+def preview_image(path: str):
+    """한글이 저장할 때 파일 안에 넣어 둔 첫 쪽 그림(PrvImage, 보통 PNG). 한글 없이 실제 모양을 보여줄 때 쓴다.
+    없거나 못 읽으면 None."""
+    import io
+    try:
+        with open(path, "rb") as f:
+            data = OleFile(f.read()).stream("PrvImage")
+        if not data:
+            return None
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        return im.convert("RGB")
+    except Exception:
+        return None

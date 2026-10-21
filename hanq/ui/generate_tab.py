@@ -88,7 +88,7 @@ class GenerateTab:
         self._request.pack(fill="both", expand=True, padx=14, pady=(6, 12))
         self._request.insert("1.0", EXAMPLE_REQUEST)
 
-        tk.Label(c3, text="공문, 지난 계획서, 안내문 등 (HWP·HWPX·PDF·DOCX·TXT)\n두 번 누르면 문서를 미리 볼 수 있습니다.",
+        tk.Label(c3, text="공문, 지난 계획서, 안내문 등 (HWP·HWPX·PDF·DOCX·TXT)\n[보기]·두 번 누르기: 문서 모양 / [보낼 글]: AI에게 보내는 글",
                  bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
         self._ref_list = tk.Listbox(c3, height=3, bg=INPUT_BG, fg=TEXT, relief="flat", font=FONT_SM,
                                     highlightthickness=1, highlightbackground=BORDER,
@@ -97,10 +97,10 @@ class GenerateTab:
         self._ref_list.bind("<Double-Button-1>", lambda e: self._show_ref_doc())
         rrow = tk.Frame(c3, bg=CARD)
         rrow.pack(fill="x", padx=14, pady=(0, 12))
-        button(rrow, "추가…", self._add_ref).pack(side="left")
-        button(rrow, "문서 보기", self._show_ref_doc).pack(side="left", padx=(6, 0))
-        button(rrow, "AI에 보낼 글", self._show_ref).pack(side="left", padx=6)
-        button(rrow, "제거", self._remove_ref).pack(side="left")
+        # 좁은 창에서도 다 보이게 짧은 이름으로 (자세한 뜻은 위 안내 글에)
+        for text, cmd in (("추가…", self._add_ref), ("보기", self._show_ref_doc),
+                          ("보낼 글", self._show_ref), ("제거", self._remove_ref)):
+            button(rrow, text, cmd, padx=8).pack(side="left", padx=(0, 4))
 
     # ── 양식 ────────────────────────────────────────────────────────────
     def _all_forms(self):

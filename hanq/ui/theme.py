@@ -67,9 +67,10 @@ BUTTON_COLORS = {
 
 def button(parent, text, command, kind="normal", **kw):
     bg, fg, active = BUTTON_COLORS[kind]
+    opts = {"relief": "flat", "bd": 0, "padx": 12, "pady": 6, "cursor": "hand2",
+            "font": FONT_B if kind != "normal" else FONT, **kw}   # kw로 기본값을 바꿀 수 있다
     return (_FlatButton if IS_MAC else tk.Button)(
-        parent, text=text, command=command, bg=bg, fg=fg, activebackground=active, activeforeground=fg,
-        relief="flat", bd=0, padx=12, pady=6, cursor="hand2", font=FONT_B if kind != "normal" else FONT, **kw)
+        parent, text=text, command=command, bg=bg, fg=fg, activebackground=active, activeforeground=fg, **opts)
 
 
 def restyle(btn, kind: str):
