@@ -45,15 +45,20 @@ def find_cli(provider: str) -> str | None:
     """Claude Code / Codex 실행 파일을 PATH와 흔한 설치 위치에서 찾는다."""
     import os
     import shutil
+    from platform_util import IS_WIN, cli_env
     name = CLI_NAMES[provider]
-    found = shutil.which(name)
+    found = shutil.which(name, path=cli_env()["PATH"])
     if found:
         return found
+    import glob
+    if not IS_WIN:
+        # nvm으로 깐 node의 전역 패키지 (가장 최근 것)
+        hits = glob.glob(os.path.expanduser(f"~/.nvm/versions/node/*/bin/{name}"))
+        return max(hits, key=os.path.getmtime) if hits else None
     home = os.path.expanduser("~")
     appdata = os.environ.get("APPDATA", "")
     local = os.environ.get("LOCALAPPDATA", "")
     # 데스크톱 앱에 포함된 실행 파일 (폴더에 버전이 들어가므로 가장 최근 것을 고름)
-    import glob
     bundled = {
         "claude_code": [os.path.join(local, "Claude-Data", "*", "claude-code", "*", "*", "claude.exe"),
                         os.path.join(local, "Claude-Data", "*", "claude-code", "*", "claude.exe")],
@@ -75,10 +80,11 @@ def _run_cli(cmd: list[str], stdin_text: str, timeout: int, on_progress, cwd: st
     import subprocess
     import threading
     import time
+    from platform_util import cli_env
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, cwd=cwd, creationflags=flags)
+                                stderr=subprocess.PIPE, cwd=cwd, creationflags=flags, env=cli_env(cmd[0]))
     except OSError as e:
         raise LLMError(f"실행할 수 없습니다: {cmd[0]}\n{e}")
     result = {}
@@ -102,7 +108,7 @@ def _run_cli(cmd: list[str], stdin_text: str, timeout: int, on_progress, cwd: st
         hint = ""
         low = (out + err).lower()
         if "login" in low or "auth" in low or "credential" in low:
-            hint = "\n\n로그인이 필요합니다. 명령 프롬프트에서 한 번 실행해 로그인해 주세요."
+            hint = "\n\n로그인이 필요합니다. 명령 프롬프트(맥은 터미널)에서 한 번 실행해 로그인해 주세요."
         raise LLMError(f"{cmd[0]} 실행 오류 (코드 {proc.returncode})\n{(err or out).strip()[:600]}{hint}")
     return out
 
@@ -168,10 +174,11 @@ def complete_cli(provider: str, exe: str, model: str, system: str, user: str,
 
 def cli_version(provider: str, exe: str) -> str:
     import subprocess
+    from platform_util import cli_env
     exe = exe or find_cli(provider)
     if not exe:
         raise LLMError("실행 파일을 찾을 수 없습니다.")
-    r = subprocess.run([exe, "--version"], capture_output=True, timeout=30,
+    r = subprocess.run([exe, "--version"], capture_output=True, timeout=30, env=cli_env(exe),
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return (r.stdout or r.stderr).decode("utf-8", errors="replace").strip()
 

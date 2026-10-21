@@ -1,0 +1,94 @@
+# 윈도우 설치 파일(.exe)과 맥 설치 파일(.dmg)을 GitHub 서버에서 빌드한다.
+# PyInstaller는 교차 빌드가 안 되므로 각 운영체제 러너에서 따로 만든다.
+#  - 코드를 push하면 빌드 → Actions 실행 화면 아래 Artifacts에서 내려받기
+#  - v1.0.0 같은 태그를 push하면 Releases에도 자동으로 올라간다
+name: Build installers
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "**.py"
+      - "forms/**"
+      - "assets/**"
+      - "installer/**"
+      - "requirements.txt"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build exe + installer
+        run: python build_installer.py
+      - name: Smoke test
+        run: python tools/smoke_test.py dist\HanQ\HanQ.exe 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HanQ-windows
+          path: installer_output/*.exe
+          if-no-files-found: error
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest      # Apple Silicon (M1~)
+            arch: arm64
+          - runner: macos-15-intel    # Intel 맥
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build app + dmg
+        run: python build_installer.py
+      - name: Smoke test
+        run: python tools/smoke_test.py dist/HanQ.app/Contents/MacOS/HanQ 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HanQ-mac-${{ matrix.arch }}
+          path: installer_output/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*

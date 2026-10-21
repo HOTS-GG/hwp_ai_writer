@@ -1,15 +1,30 @@
 """
-한큐(HanQ) → exe 빌드
+한큐(HanQ) → 실행 파일 빌드 (윈도우 exe / 맥 app)
 실행: python build_exe.py
-결과: dist\\HanQ\\HanQ.exe (폴더째 배포)
+결과: 윈도우  dist\\HanQ\\HanQ.exe (폴더째 배포)
+      맥      dist/HanQ.app
+PyInstaller는 교차 빌드가 안 되므로 exe는 윈도우에서, app은 맥에서 빌드한다.
 """
+import os
+import plistlib
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+from settings import APP_VERSION  # noqa: E402
+
 APP_NAME = "HanQ"
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+BUNDLE_ID = "kr.hanq.writer"
+
+
+def output_path() -> Path:
+    dist = HERE / "dist"
+    return dist / f"{APP_NAME}.app" if IS_MAC else dist / APP_NAME / f"{APP_NAME}.exe"
 
 
 def main():
@@ -22,15 +37,17 @@ def main():
     shutil.rmtree(dist, ignore_errors=True)
     shutil.rmtree(build, ignore_errors=True)
 
+    # --add-data의 구분자는 윈도우 ';', 맥 ':'
+    sep = os.pathsep
+    # 맥은 png를 주면 PyInstaller가 Pillow로 icns를 만든다
+    icon = HERE / "assets" / ("icon.ico" if IS_WIN else "icon.png")
     cmd = [
         sys.executable, "-m", "PyInstaller",
         f"--name={APP_NAME}", "--onedir", "--windowed", "--noconfirm", "--clean",
         f"--distpath={dist}", f"--workpath={build}", f"--specpath={build}",
-        "--add-data", f"{HERE / 'forms'};forms",
-        "--add-data", f"{HERE / 'assets' / 'icon.ico'};assets",
-        f"--icon={HERE / 'assets' / 'icon.ico'}",
-        "--hidden-import", "win32com.client",
-        "--hidden-import", "pythoncom",
+        "--add-data", f"{HERE / 'forms'}{sep}forms",
+        "--add-data", f"{HERE / 'assets' / 'icon.ico'}{sep}assets",
+        f"--icon={icon}",
         "--hidden-import", "PIL.ImageTk",
         # 예전 RAG 버전의 무거운 라이브러리가 끌려 들어가지 않게 제외
         "--exclude-module", "torch",
@@ -40,13 +57,39 @@ def main():
         "--exclude-module", "onnxruntime",
         "--exclude-module", "matplotlib",
         "--exclude-module", "pandas",
-        str(HERE / "main.py"),
     ]
+    if IS_WIN:
+        cmd += ["--hidden-import", "win32com.client", "--hidden-import", "pythoncom"]
+    if IS_MAC:
+        cmd += [f"--osx-bundle-identifier={BUNDLE_ID}"]
+    cmd.append(str(HERE / "main.py"))
+
     print("빌드 시작…")
     if subprocess.run(cmd, cwd=HERE).returncode != 0:
         print("빌드 실패")
         sys.exit(1)
-    print(f"\n빌드 성공: {dist / APP_NAME / (APP_NAME + '.exe')}")
+    if IS_MAC:
+        _finish_mac_app(output_path())
+    print(f"\n빌드 성공: {output_path()}")
+
+
+def _finish_mac_app(app: Path):
+    """Info.plist에 버전·한글 이름을 넣고, 바뀐 번들을 다시 서명(ad-hoc)한다."""
+    plist = app / "Contents" / "Info.plist"
+    with open(plist, "rb") as f:
+        info = plistlib.load(f)
+    info.update({
+        "CFBundleDisplayName": "한큐",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
+        "CFBundleDevelopmentRegion": "ko",
+        "NSHighResolutionCapable": True,
+        "LSMinimumSystemVersion": "11.0",
+    })
+    with open(plist, "wb") as f:
+        plistlib.dump(info, f)
+    # Apple Silicon은 서명이 없는 실행 파일을 아예 실행하지 않는다 (개발자 인증서 없이 ad-hoc 서명)
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
 
 
 if __name__ == "__main__":

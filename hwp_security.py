@@ -5,7 +5,10 @@
 HKCU\\Software\\HNC\\HwpAutomation\\Modules 에 등록하고 RegisterModule로 불러오면 경고가 사라진다.
 """
 import shutil
-import winreg
+try:
+    import winreg
+except ImportError:  # 맥: 레지스트리도 한글 COM도 없다
+    winreg = None
 from pathlib import Path
 
 from settings import APP_DIR, resource_dir
@@ -24,6 +27,8 @@ def find_dll() -> Path | None:
 
 
 def registered_path() -> str | None:
+    if winreg is None:
+        return None
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH) as k:
             return winreg.QueryValueEx(k, MODULE_NAME)[0]
@@ -44,6 +49,8 @@ def install(dll_path: str) -> Path:
 
 
 def _write_registry(dll: Path):
+    if winreg is None:
+        raise OSError("보안 승인 모듈은 윈도우용 한글에서만 쓸 수 있습니다.")
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_PATH) as k:
         winreg.SetValueEx(k, MODULE_NAME, 0, winreg.REG_SZ, str(dll))
 
