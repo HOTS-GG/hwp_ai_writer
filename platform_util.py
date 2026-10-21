@@ -4,8 +4,10 @@
 맥에서는 hwpx 안의 첫 쪽 미리보기 이미지로 대신하고, 문서는 기본 앱(맥용 한글 등)으로 연다.
 """
 import os
+import re
 import subprocess
 import sys
+import threading
 
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -49,9 +51,37 @@ def zoom_modifier(e) -> bool:
     return bool(e.state & (0x4 | (0x8 if IS_MAC else 0)))
 
 
+_login_env: dict | None = None
+_login_lock = threading.Lock()
+_ENV_MARK = "__HANQ_ENV__"
+
+
+def login_shell_env() -> dict:
+    """맥 앱을 Finder·Dock에서 띄우면 터미널(.zshrc 등)에서 설정한 환경변수가 하나도 없어,
+    터미널에서는 로그인된 claude가 한큐에서는 로그인 안 됨으로 나온다. 로그인 셸에서 한 번 읽어 온다."""
+    global _login_env
+    with _login_lock:
+        if _login_env is None:
+            _login_env = {}
+            if IS_MAC:
+                shell = os.environ.get("SHELL") or "/bin/zsh"
+                try:
+                    out = subprocess.run([shell, "-ilc", f"printf {_ENV_MARK}; env -0"],
+                                         capture_output=True, timeout=15, stdin=subprocess.DEVNULL).stdout
+                    # .zshrc가 화면에 찍는 글자는 표시 앞쪽에 오므로 버린다
+                    body = out.decode("utf-8", errors="replace").split(_ENV_MARK, 1)[-1]
+                    for item in body.split("\0"):
+                        k, sep, v = item.partition("=")
+                        if sep and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+                            _login_env[k] = v
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        return _login_env
+
+
 def cli_env(exe: str = "") -> dict:
     """CLI 실행용 환경변수. 실행 파일 폴더도 PATH에 넣어 같은 곳의 node(nvm 등)를 찾게 한다."""
-    env = dict(os.environ)
+    env = {**os.environ, **login_shell_env()}
     dirs = ([os.path.dirname(exe)] if exe and not IS_WIN else []) + EXTRA_BIN_DIRS
     if dirs:
         env["PATH"] = os.pathsep.join([*dirs, env.get("PATH", "")])
