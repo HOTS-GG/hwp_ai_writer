@@ -44,8 +44,14 @@ class _Styles:
     """header.xml의 글자 모양·문단 모양 중 미리보기에 필요한 값."""
 
     def __init__(self, header):
-        self.chars, self.paras, self.fills = {}, {}, {}
+        self.chars, self.paras, self.fills, self.borders = {}, {}, {}, {}
         for bf in header.iter(f"{{{HH}}}borderFill"):
+            # 칸 테두리: 선이 있는 쪽만 (왼, 위, 오른, 아래)
+            sides = []
+            for side in ("leftBorder", "topBorder", "rightBorder", "bottomBorder"):
+                e = bf.find(f"{{{HH}}}{side}")
+                sides.append(e is not None and e.get("type", "NONE") != "NONE")
+            self.borders[bf.get("id")] = sides
             wb = bf.find(f".//{{{HC}}}winBrush")
             color = wb.get("faceColor") if wb is not None else None
             if color and color.startswith("#") and color.upper() != "#FFFFFF":
@@ -323,7 +329,13 @@ class _Renderer:
         for c in cells:
             top, bot = ys[c["row"]], ys[c["row"] + c["rs"]]
             fill = self.styles.fills.get(c["tc"].get("borderFillIDRef"))
-            self.draw.rectangle([c["x"], top, c["x2"], bot], outline="#000000", fill=fill)
+            if fill:
+                self.draw.rectangle([c["x"], top, c["x2"], bot], fill=fill)
+            left, up, right, down = self.styles.borders.get(c["tc"].get("borderFillIDRef"), [True] * 4)
+            for on, xy in ((left, [c["x"], top, c["x"], bot]), (up, [c["x"], top, c["x2"], top]),
+                           (right, [c["x2"], top, c["x2"], bot]), (down, [c["x"], bot, c["x2"], bot])):
+                if on:
+                    self.draw.line(xy, fill="#000000")
             sl = c["tc"].find(SUBLIST)
             valign = sl.get("vertAlign", "TOP") if sl is not None else "TOP"
             off = {"CENTER": (bot - top - c["text_h"]) / 2, "BOTTOM": bot - top - c["text_h"]}.get(valign, 0)

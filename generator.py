@@ -201,17 +201,19 @@ EDIT_SYSTEM = f"""당신은 한국 학교·공공기관 문서 편집 도우미�
 입력 문서 구조:
 - [S번호] : 문서의 한 줄(또는 한 칸). 고치려면 줄 전체를 새 텍스트로 돌려줌
 - [T번호] 표 : 머리행 아래의 행들. 표를 고칠 때는 그 표의 '전체 행'을 열 순서대로 돌려줌(행 추가·삭제 가능)
-- [H번호] 장 제목, [I번호] 그림(직인·로고·사진 등)
+- [H번호] 장 제목, [I번호] 그림(직인·로고·사진 등), [B번호] 표 틀(그 아래 '│' 줄들이 그 표의 칸 내용)
 - '│'로 시작하는 줄은 표 칸 안의 내용
 
 출력: JSON 객체 하나만.
 {{"reply": "무엇을 바꿨는지 한두 문장으로", "slots": {{"S12": "고친 줄"}}, "tables": {{"T2": [["칸", "칸"]]}},
-  "inserts": [], "styles": [], "new_sections": [], "deletes": [], "moves": [], "replace_all": []}}
+  "inserts": [], "styles": [], "new_sections": [], "deletes": [], "moves": [], "replace_all": [], "unwraps": []}}
 - 바꾼 것만 넣음. 쓰지 않는 항목은 빼도 됨
 - 원래 줄의 앞쪽 공백과 번호 체계(1. / 가. / ❍ / - 등)를 유지
 - 줄을 뒤에 추가하려면 해당 줄 값에 \\n으로 이어 쓰고, 번호를 이어감 (예: "  2. 기존 내용\\n  3. 새 내용")
 - 줄을 지우려면 ""
-- 통째로 지우기 "deletes": ["H8"] 장 전체(제목 상자와 그 아래 내용), ["T3"] 표 전체(머리행 포함), ["I2"] 그림
+- 통째로 지우기 "deletes": ["H8"] 장 전체(제목 상자와 그 아래 내용), ["B3"]·["T3"] 표 전체(머리행 포함), ["I2"] 그림
+- 표 틀만 없애고 칸 안의 글은 남기기 "unwraps": ["B3"] (칸 글이 표 자리에 차례로 줄이 됨)
+- 표 테두리 선만 없애기/그리기 "styles": [{{"target": "B3", "border": false}}] (true면 실선)
   (장 제목 상자 칸이나 표 행을 ""로 비우면 빈 상자·빈 행이 남으므로, 통째로 지울 때는 반드시 deletes를 씀.
    지우거나 옮긴 뒤 장 번호는 프로그램이 다시 매김)
 - 옮기기 "moves": [{{"block": "H3", "after": "H5"}}, {{"block": "S12", "before": "S4"}}]
@@ -268,21 +270,23 @@ def edit_document(path: str, out_path: str, instruction: str, history: list[tupl
     inserts = data.get("inserts") or []
     styles = data.get("styles") or []
     deletes = [d for d in (data.get("deletes") or [])
-               if str(d).strip() in doc.headings or str(d).strip() in doc.tables or str(d).strip() in doc.images]
+               if any(str(d).strip() in m for m in (doc.headings, doc.tables, doc.images, doc.boxes))]
     moves = [m for m in (data.get("moves") or []) if isinstance(m, dict)]
     replace_all = [r for r in (data.get("replace_all") or []) if isinstance(r, dict)]
+    unwraps = [u for u in (data.get("unwraps") or []) if str(u).strip() in doc.boxes or str(u).strip() in doc.tables]
     changed = 0
     unchanged = False
     missed = []
     dropped = [k for k in (data.get("slots") or {}) if k not in doc.slots]
     dropped += [str(d) for d in (data.get("deletes") or []) if d not in deletes]
+    dropped += [str(u) for u in (data.get("unwraps") or []) if u not in unwraps]
     if dropped:
         missed.append(f"없는 줄 번호 {', '.join(dropped[:5])}")
-    if slots or tables or new_sections or inserts or styles or deletes or moves or replace_all:
+    if slots or tables or new_sections or inserts or styles or deletes or moves or replace_all or unwraps:
         status("문서에 반영 중…")
-        r = doc.fill(slots, tables, new_sections, inserts, styles, deletes, moves, replace_all)
+        r = doc.fill(slots, tables, new_sections, inserts, styles, deletes, moves, replace_all, unwraps)
         changed = (len(slots) + len(tables) + r["sections"] + r["inserted"] + r["styled"] + r["deleted"]
-                   + r["moved"] + r["replaced"])
+                   + r["moved"] + r["replaced"] + r["unwrapped"])
         want_lines = sum(len(i.get("lines") or []) for i in inserts if isinstance(i, dict))
         if r["inserted"] < want_lines:
             missed.append(f"끼워 넣을 줄 {want_lines - r['inserted']}개")
