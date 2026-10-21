@@ -234,6 +234,10 @@ class HwpxDoc:
                 zi.compress_type = ct
                 z.writestr(zi, data)
 
+    def snapshot(self) -> bytes:
+        """본문 XML 전체. 수정 전후를 비교해 실제로 바뀐 게 있는지 본다."""
+        return b"".join(etree.tostring(r) for r in self.ordered_sections())
+
     def plain_text(self) -> str:
         lines = []
         for root in self.sections.values():
@@ -408,15 +412,58 @@ class HwpxDoc:
 
     # ── 채우기 ──────────────────────────────────────────────────────────
     def fill(self, slots: dict, tables: dict, new_sections: list | None = None,
-             inserts: list | None = None, styles: list | None = None) -> dict:
+             inserts: list | None = None, styles: list | None = None, deletes: list | None = None) -> dict:
         sequential = self._headings_sequential()
         self._fill_slots_tables(slots, tables)
         inserted = self.insert_lines(inserts or [])
         styled = self.apply_styles(styles or [])
+        deleted = self.delete_blocks(deletes or [])
         added = self.insert_sections(new_sections or [])
-        if added and sequential:
+        if (added or deleted) and sequential and self._all_headings():
             self._renumber_headings()
-        return {"styled": styled, "inserted": inserted, "sections": added}
+        return {"styled": styled, "inserted": inserted, "sections": added, "deleted": deleted}
+
+    # ── 장·표 통째로 지우기 ─────────────────────────────────────────────
+    @staticmethod
+    def _is_ending(p) -> bool:
+        s = _para_text(p).strip()
+        return s.startswith("붙임") or s.endswith("끝.")
+
+    def delete_blocks(self, refs: list) -> int:
+        """H번호는 장 전체(제목 상자부터 다음 장 제목 앞까지, '붙임 … 끝.' 줄은 남김),
+        T번호는 그 표 전체(머리행 포함)를 지운다. 지운 개수를 돌려준다."""
+        heads = {id(p) for p in self.headings.values()}
+        removed = 0
+        for ref in refs:
+            ref = str(ref).strip()
+            if ref in self.headings:
+                p = self.headings[ref]
+                if p.getparent() is None:
+                    continue
+                victims, cur = [p], p.getnext()
+                while cur is not None and id(cur) not in heads and not (cur.tag == P and self._is_ending(cur)):
+                    victims.append(cur)
+                    cur = cur.getnext()
+                for v in victims:
+                    # 문서 설정(secPr)이 든 줄은 지우면 문서가 깨지므로 남긴다
+                    if v.find(f".//{{{HP}}}secPr") is None and v.getparent() is not None:
+                        v.getparent().remove(v)
+                removed += 1
+            elif ref in self.tables:
+                tbl = self.tables[ref].tbl
+                run = tbl.getparent()
+                p = run.getparent() if run is not None else None
+                if p is None:
+                    continue
+                parent = p.getparent()
+                alone = (not _para_text(p).strip() and sum(1 for r in p.iterfind(RUN) for c in r if c.tag != T) == 1)
+                if alone and parent is not None and p.find(f".//{{{HP}}}secPr") is None and \
+                        not (parent.tag == SUBLIST and len(parent.findall(P)) <= 1):
+                    parent.remove(p)
+                else:
+                    run.remove(tbl)
+                removed += 1
+        return removed
 
     # ── 글자 모양(색·굵게 등) ────────────────────────────────────────────
     def _header_root(self):

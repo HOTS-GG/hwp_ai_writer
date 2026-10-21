@@ -205,11 +205,15 @@ EDIT_SYSTEM = f"""당신은 한국 학교·공공기관 문서 편집 도우미�
 
 출력: JSON 객체 하나만.
 {{"reply": "무엇을 바꿨는지 한두 문장으로", "slots": {{"S12": "고친 줄"}}, "tables": {{"T2": [["칸", "칸"]]}},
-  "inserts": [], "styles": [], "new_sections": []}}
+  "inserts": [], "styles": [], "new_sections": [], "deletes": []}}
 - 바꾼 것만 넣음. 쓰지 않는 항목은 빼도 됨
 - 원래 줄의 앞쪽 공백과 번호 체계(1. / 가. / ❍ / - 등)를 유지
 - 줄을 뒤에 추가하려면 해당 줄 값에 \\n으로 이어 쓰고, 번호를 이어감 (예: "  2. 기존 내용\\n  3. 새 내용")
 - 줄을 지우려면 ""
+- 장(제목 상자와 그 아래 내용 전체)을 지우려면 "deletes": ["H8"], 표 전체(머리행 포함)를 지우려면 "deletes": ["T3"]
+  (장 제목 상자 칸이나 표 행을 ""로 비우면 빈 상자·빈 행이 남으므로, 통째로 지울 때는 반드시 deletes를 씀.
+   지운 뒤 남은 장 번호는 프로그램이 다시 매김)
+- reply에는 실제로 JSON에 넣은 변경만 적음. 넣지 않은 변경을 했다고 말하지 않음
 - 요청이 모호하거나 문서에 해당 부분이 없으면 slots와 tables를 비우고 reply에 무엇이 필요한지 물음
 - 장 제목 번호 박스(숫자 1, 2, 3…)는 바꾸지 않음
 - "○○ 장을 추가해줘"처럼 새 장이 필요하면 new_sections를 씀
@@ -242,6 +246,7 @@ def edit_document(path: str, out_path: str, instruction: str, history: list[tupl
     pinfo = pinfo or {}
     doc = HwpxDoc(path)
     outline = doc.analyze(edit=True, page_map=pinfo.get("paras"), page_count=pinfo.get("pages"))
+    before = doc.snapshot()
     images = pages[: ai.get("max_images", 6)] if ai.get("send_images", True) else []
     hist = "\n".join(f"{'사용자' if who == 'user' else 'AI'}: {msg}" for who, msg in history[-8:])
     user = (f"## 현재 문서 구조\n{outline}\n\n"
@@ -255,15 +260,17 @@ def edit_document(path: str, out_path: str, instruction: str, history: list[tupl
     new_sections = data.get("new_sections") or []
     inserts = data.get("inserts") or []
     styles = data.get("styles") or []
+    deletes = [d for d in (data.get("deletes") or []) if str(d).strip() in doc.headings or str(d).strip() in doc.tables]
     changed = 0
+    unchanged = False
     missed = []
     dropped = [k for k in (data.get("slots") or {}) if k not in doc.slots]
     if dropped:
         missed.append(f"없는 줄 번호 {', '.join(dropped[:5])}")
-    if slots or tables or new_sections or inserts or styles:
+    if slots or tables or new_sections or inserts or styles or deletes:
         status("문서에 반영 중…")
-        r = doc.fill(slots, tables, new_sections, inserts, styles)
-        changed = len(slots) + len(tables) + r["sections"] + r["inserted"] + r["styled"]
+        r = doc.fill(slots, tables, new_sections, inserts, styles, deletes)
+        changed = len(slots) + len(tables) + r["sections"] + r["inserted"] + r["styled"] + r["deleted"]
         want_lines = sum(len(i.get("lines") or []) for i in inserts if isinstance(i, dict))
         if r["inserted"] < want_lines:
             missed.append(f"끼워 넣을 줄 {want_lines - r['inserted']}개")
@@ -271,10 +278,17 @@ def edit_document(path: str, out_path: str, instruction: str, history: list[tupl
             missed.append(f"글자 모양 {len(styles) - r['styled']}곳")
         if r["sections"] < len(new_sections):
             missed.append(f"새 장 {len(new_sections) - r['sections']}개")
+        # AI가 같은 글자를 그대로 돌려준 경우: 고쳤다고 답해도 실제로는 바뀐 게 없다
+        if changed and doc.snapshot() == before:
+            changed = 0
+            unchanged = True
         if changed:
             doc.save(out_path)
     warning = ("AI가 요청한 것 중 " + ", ".join(missed) + "을(를) 문서에 반영하지 못했습니다. "
                "위치를 더 구체적으로 말씀해 주세요.") if missed else ""
+    if unchanged:
+        warning = ("AI가 고쳤다고 답했지만 실제 문서는 바뀌지 않았습니다. "
+                   "고칠 곳을 더 구체적으로 말씀해 주세요. (예: '5장 소요 예산을 통째로 지워줘')")
     return {"reply": str(data.get("reply", "")).strip(), "changed": changed, "warning": warning}
 
 
