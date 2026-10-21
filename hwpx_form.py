@@ -18,6 +18,11 @@ HEADER_NAME = "Contents/header.xml"
 P, RUN, T, TBL, TR, TC = (f"{{{HP}}}{n}" for n in ("p", "run", "t", "tbl", "tr", "tc"))
 SUBLIST, CELLADDR, CELLSPAN, CELLSZ, SZ = (f"{{{HP}}}{n}" for n in ("subList", "cellAddr", "cellSpan", "cellSz", "sz"))
 LINESEG = f"{{{HP}}}linesegarray"
+PIC = f"{{{HP}}}pic"
+SECPR = f"{{{HP}}}secPr"
+HWPUNIT_PER_MM = 7200 / 25.4
+ALIGNS = {"left": "LEFT", "center": "CENTER", "right": "RIGHT", "justify": "JUSTIFY", "distribute": "DISTRIBUTE",
+          "왼쪽": "LEFT", "가운데": "CENTER", "오른쪽": "RIGHT", "양쪽": "JUSTIFY", "배분": "DISTRIBUTE"}
 
 PLACEHOLDER = re.compile(r"[○◯]|\{\{[^}]*\}\}|_{3,}|ＯＯ|OOO")
 NUMBER_ONLY = re.compile(r"^\s*\d+\s*$")
@@ -210,7 +215,9 @@ class HwpxDoc:
         self._cur_page = None
         self._header = None
         self._charpr_cache: dict = {}
+        self._parapr_cache: dict = {}
         self.headings: dict[str, object] = {}
+        self.images: dict[str, object] = {}
         self.slots: dict[str, object] = {}
         self.tables: dict[str, TableGroup] = {}
         self._outline: list[str] = []
@@ -260,6 +267,7 @@ class HwpxDoc:
         self.slots.clear()
         self.tables.clear()
         self.headings.clear()
+        self.images.clear()
         self._outline = []
         self.edit_mode = edit
         all_text = self.plain_text()
@@ -342,7 +350,19 @@ class HwpxDoc:
             for run in p.iterfind(RUN):
                 for c in run:
                     if c.tag != T:
+                        if self.edit_mode and c.tag != TBL and (c.tag == PIC or c.find(f".//{PIC}") is not None):
+                            self._add_image(c, prefix)
                         self._scan_obj(c, prefix)
+
+    def _add_image(self, obj, prefix):
+        """수정 모드: 그림(직인·로고 등)을 I번호로 내놓아 지우거나 옮길 수 있게 한다."""
+        iid = f"I{len(self.images) + 1}"
+        self.images[iid] = obj
+        sz = obj.find(SZ)
+        w = int(sz.get("width", "0") or 0) if sz is not None else 0
+        h = int(sz.get("height", "0") or 0) if sz is not None else 0
+        size = f" 약 {w / HWPUNIT_PER_MM:.0f}×{h / HWPUNIT_PER_MM:.0f}mm" if w and h else ""
+        self._outline.append(f"{prefix}[{iid}] (그림{size})")
 
     def _scan_obj(self, e, prefix):
         if e.tag == TBL:
@@ -412,27 +432,108 @@ class HwpxDoc:
 
     # ── 채우기 ──────────────────────────────────────────────────────────
     def fill(self, slots: dict, tables: dict, new_sections: list | None = None,
-             inserts: list | None = None, styles: list | None = None, deletes: list | None = None) -> dict:
+             inserts: list | None = None, styles: list | None = None, deletes: list | None = None,
+             moves: list | None = None, replace_all: list | None = None) -> dict:
         sequential = self._headings_sequential()
+        hs = self._all_headings()
+        start = HwpxDoc._cell_text(hs[0][1][1]).strip() if hs else None
         self._fill_slots_tables(slots, tables)
+        replaced = self.replace_everywhere(replace_all or [])
         inserted = self.insert_lines(inserts or [])
         styled = self.apply_styles(styles or [])
+        moved = self.move_blocks(moves or [])
         deleted = self.delete_blocks(deletes or [])
         added = self.insert_sections(new_sections or [])
-        if (added or deleted) and sequential and self._all_headings():
-            self._renumber_headings()
-        return {"styled": styled, "inserted": inserted, "sections": added, "deleted": deleted}
+        if (added or deleted or moved) and sequential and self._all_headings():
+            self._renumber_headings(start)
+        return {"styled": styled, "inserted": inserted, "sections": added, "deleted": deleted,
+                "moved": moved, "replaced": replaced}
 
-    # ── 장·표 통째로 지우기 ─────────────────────────────────────────────
+    # ── 문서 전체 찾아 바꾸기 ────────────────────────────────────────────
+    def replace_everywhere(self, pairs: list) -> int:
+        n = 0
+        for pr in pairs:
+            if not isinstance(pr, dict) or not str(pr.get("find", "")):
+                continue
+            find, repl = str(pr["find"]), str(pr.get("replace", ""))
+            for root in self.ordered_sections():
+                for t in root.iter(T):
+                    text = t_text(t)
+                    if find in text:
+                        set_t(t, text.replace(find, repl))
+                        n += 1
+        return n
+
+    # ── 장·표·그림 통째로 지우기 / 옮기기 ────────────────────────────────
     @staticmethod
     def _is_ending(p) -> bool:
         s = _para_text(p).strip()
         return s.startswith("붙임") or s.endswith("끝.")
 
+    @staticmethod
+    def _top_para(e):
+        """요소가 든 본문 문단(섹션 바로 아래 문단)."""
+        top = None
+        while e is not None:
+            if e.tag == P:
+                top = e
+            if e.getparent() is None:
+                break
+            e = e.getparent()
+        return top
+
+    def _section_block(self, head_p) -> list:
+        """장 제목 문단부터 다음 장 제목 앞까지('붙임 … 끝.' 줄은 뺌)."""
+        heads = {id(p) for p in self.headings.values()}
+        block, cur = [head_p], head_p.getnext()
+        while cur is not None and id(cur) not in heads and not (cur.tag == P and self._is_ending(cur)):
+            block.append(cur)
+            cur = cur.getnext()
+        return block
+
+    def _block(self, ref: str) -> list:
+        """옮길 덩어리: H는 장 전체, S·T·I는 그것이 든 본문 문단 하나."""
+        ref = str(ref).strip()
+        if ref in self.headings:
+            return self._section_block(self.headings[ref])
+        el = (self.tables[ref].tbl if ref in self.tables else self.images.get(ref)
+              or (self.slots[ref] if ref in self.slots else None))
+        p = self._top_para(el) if el is not None else None
+        return [p] if p is not None and p.getparent() is not None else []
+
+    def move_blocks(self, moves: list) -> int:
+        """{"block": "H3", "after": "H5"} / {"block": "S12", "before": "S4"} 처럼 장이나 줄을 옮긴다."""
+        n = 0
+        for mv in moves:
+            if not isinstance(mv, dict):
+                continue
+            blk = [e for e in self._block(mv.get("block", "")) if e.find(f".//{SECPR}") is None]
+            after = "after" in mv
+            ref = mv.get("after") if after else mv.get("before")
+            if not blk or not ref:
+                continue
+            ref_blk = self._block(ref)
+            if not ref_blk or any(e is r for e in blk for r in ref_blk):
+                continue
+            for e in blk:
+                e.getparent().remove(e)
+            tgt = self._block(ref)
+            if not tgt:
+                continue
+            if after:
+                anchor = tgt[-1]
+                for e in blk:
+                    anchor.addnext(e)
+                    anchor = e
+            else:
+                for e in blk:
+                    tgt[0].addprevious(e)
+            n += 1
+        return n
+
     def delete_blocks(self, refs: list) -> int:
         """H번호는 장 전체(제목 상자부터 다음 장 제목 앞까지, '붙임 … 끝.' 줄은 남김),
-        T번호는 그 표 전체(머리행 포함)를 지운다. 지운 개수를 돌려준다."""
-        heads = {id(p) for p in self.headings.values()}
+        T번호는 그 표 전체(머리행 포함), I번호는 그 그림을 지운다. 지운 개수를 돌려준다."""
         removed = 0
         for ref in refs:
             ref = str(ref).strip()
@@ -440,28 +541,20 @@ class HwpxDoc:
                 p = self.headings[ref]
                 if p.getparent() is None:
                     continue
-                victims, cur = [p], p.getnext()
-                while cur is not None and id(cur) not in heads and not (cur.tag == P and self._is_ending(cur)):
-                    victims.append(cur)
-                    cur = cur.getnext()
-                for v in victims:
+                for v in self._section_block(p):
                     # 문서 설정(secPr)이 든 줄은 지우면 문서가 깨지므로 남긴다
-                    if v.find(f".//{{{HP}}}secPr") is None and v.getparent() is not None:
+                    if v.find(f".//{SECPR}") is None and v.getparent() is not None:
                         v.getparent().remove(v)
                 removed += 1
-            elif ref in self.tables:
-                tbl = self.tables[ref].tbl
-                run = tbl.getparent()
-                p = run.getparent() if run is not None else None
-                if p is None:
+            elif ref in self.tables or ref in self.images:
+                obj = self.tables[ref].tbl if ref in self.tables else self.images[ref]
+                run = obj.getparent()
+                if run is None:
                     continue
-                parent = p.getparent()
-                alone = (not _para_text(p).strip() and sum(1 for r in p.iterfind(RUN) for c in r if c.tag != T) == 1)
-                if alone and parent is not None and p.find(f".//{{{HP}}}secPr") is None and \
-                        not (parent.tag == SUBLIST and len(parent.findall(P)) <= 1):
-                    parent.remove(p)
-                else:
-                    run.remove(tbl)
+                run.remove(obj)
+                p = run.getparent()
+                if p is not None and not _has_objects(p) and not _para_text(p).strip():
+                    self._drop_if_empty(p)
                 removed += 1
         return removed
 
@@ -547,24 +640,63 @@ class HwpxDoc:
         run.set("charPrIDRef", new_id)
         return True
 
+    def _parapr_variant(self, base_id: str, para: dict) -> str:
+        """기존 문단 모양을 복제해 정렬·줄 간격만 바꾼 새 문단 모양의 id."""
+        key = (base_id, tuple(sorted((k, str(v)) for k, v in para.items())))
+        if key in self._parapr_cache:
+            return self._parapr_cache[key]
+        hdr = self._header_root()
+        props = hdr.find(f".//{{{HH}}}paraProperties")
+        items = props.findall(f"{{{HH}}}paraPr")
+        base = next((c for c in items if c.get("id") == base_id), items[0])
+        pp = copy.deepcopy(base)
+        new_id = str(max(int(c.get("id")) for c in items) + 1)
+        pp.set("id", new_id)
+        align = str(para.get("align", "")).strip().lower()
+        if align in ALIGNS:
+            al = pp.find(f"{{{HH}}}align")
+            if al is None:
+                al = etree.Element(f"{{{HH}}}align")
+                pp.insert(0, al)
+            al.set("horizontal", ALIGNS[align])
+        if para.get("line_spacing"):
+            for ls in pp.iter(f"{{{HH}}}lineSpacing"):
+                ls.set("type", "PERCENT")
+                ls.set("value", str(int(float(para["line_spacing"]))))
+        props.append(pp)
+        props.set("itemCnt", str(len(items) + 1))
+        self._parapr_cache[key] = new_id
+        return new_id
+
     def apply_styles(self, styles: list) -> int:
         n = 0
         for st in styles or []:
             if not isinstance(st, dict):
                 continue
             target = str(st.get("target", ""))
-            ts = []
+            ts, ps = [], []
             if target in self.slots:
                 ts = [self.slots[target]]
+                ps = [self.slots[target].getparent().getparent()]
             elif target in self.headings:
                 hp = heading_parts(self.headings[target])
                 ts = list(hp[2].iter(T)) if hp else []
+                ps = [self.headings[target]]
             style = {k: st[k] for k in ("color", "background", "size", "bold", "italic", "underline") if k in st}
-            if not style:
-                continue
-            for t in ts:
-                if t.getparent() is not None and self.apply_style(t, style, st.get("part")):
+            para = {k: st[k] for k in ("align", "line_spacing") if k in st}
+            if style:
+                for t in ts:
+                    if t.getparent() is not None and self.apply_style(t, style, st.get("part")):
+                        n += 1
+            for p in ps:
+                if para and p.getparent() is not None:
+                    p.set("paraPrIDRef", self._parapr_variant(p.get("paraPrIDRef", "0"), para))
                     n += 1
+                if "page_break" in st:
+                    top = self._top_para(p)
+                    if top is not None:
+                        top.set("pageBreak", "1" if st["page_break"] else "0")
+                        n += 1
         return n
 
     # ── 줄 끼워 넣기 ────────────────────────────────────────────────────
@@ -672,9 +804,10 @@ class HwpxDoc:
             return nums == list(ROMAN[start:start + len(nums)])
         return False
 
-    def _renumber_headings(self):
+    def _renumber_headings(self, start: str | None = None):
+        """장 번호를 처음 번호(start, 없으면 지금 첫 장의 번호)부터 차례로 다시 매긴다."""
         hs = self._all_headings()
-        first = HwpxDoc._cell_text(hs[0][1][1]).strip()
+        first = start or HwpxDoc._cell_text(hs[0][1][1]).strip()
         for i, (_, (tbl, num_cell, _)) in enumerate(hs):
             if first.isdigit():
                 label = str(int(first) + i)
