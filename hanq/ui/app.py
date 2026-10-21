@@ -69,7 +69,7 @@ class App(tk.Tk):
         self._save_job = None
         self._busy_listeners = []
         self._forms_listeners = []
-        self.worker = HwpWorker()
+        self.worker = self._new_worker()
         self.live = LiveView(lambda result, token: self.after(0, self._on_live_frame, result, token),
                              dpi=int(self.s.get("preview_dpi", 96)))
         self._panes = []
@@ -328,7 +328,13 @@ class App(tk.Tk):
     def restart_worker(self):
         """보안 모듈을 새로 등록한 뒤: 이미 떠 있는 한글을 새로 띄워야 적용된다."""
         self.worker.shutdown()
-        self.worker = HwpWorker()
+        self.worker = self._new_worker()
+
+    def _new_worker(self) -> HwpWorker:
+        from ..hwp.worker import PROMPT_HINT
+        w = HwpWorker()
+        w.on_prompt = lambda: self.after(0, self.status, PROMPT_HINT)
+        return w
 
     def clear_cache(self):
         shutil.rmtree(CACHE_DIR, ignore_errors=True)

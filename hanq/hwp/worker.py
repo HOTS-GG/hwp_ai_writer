@@ -15,7 +15,8 @@ from ..config import CACHE_DIR
 from ..system import IS_WIN
 
 STUCK_HINT = ("한글이 응답하지 않습니다. 한글 '접근 허용' 창이 떠 있으면 [모두 허용]을 눌러 주세요. "
-              "설정 탭에서 보안 승인 모듈을 등록하면 이 창이 더 이상 뜨지 않습니다.")
+              "(이번 실행 동안 다시 묻지 않습니다)")
+PROMPT_HINT = "한글이 파일 접근 허용을 묻고 있습니다 — 앞에 뜬 창에서 [모두 허용]을 누르면 이번 실행 동안 다시 묻지 않습니다."
 
 
 class HwpWorker:
@@ -24,6 +25,8 @@ class HwpWorker:
         self.available: bool | None = None if IS_WIN else False
         self._q: queue.Queue = queue.Queue()
         self.stuck = False   # 한글이 응답하지 않는 중 (그동안 미리보기는 간이 렌더러로)
+        self.on_prompt = None   # 한글이 '접근 허용' 창을 띄웠을 때 부를 함수 (안내용)
+        self._pid = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -112,6 +115,9 @@ class HwpWorker:
         timer = threading.Timer(self.timeout, on_timeout)
         timer.daemon = True
         timer.start()
+        finished = threading.Event()
+        if IS_WIN:
+            threading.Thread(target=self._watch_prompt, args=(finished,), daemon=True).start()
         try:
             if kind == "render":
                 path, dpi = args
@@ -133,11 +139,28 @@ class HwpWorker:
             else:
                 answer(None, f"한글로 변환하지 못했습니다: {e}")
         finally:
+            finished.set()
             timer.cancel()
             self.stuck = False
 
+    def _watch_prompt(self, finished: threading.Event):
+        """작업 중 한글이 '접근 허용' 창을 띄우면 맨 앞으로 가져오고 on_prompt로 알린다 (한 번만).
+        보안 승인 모듈이 듣지 않는 한글(예: 2018)에서는 사용자가 [모두 허용]을 한 번 눌러야 한다."""
+        if finished.wait(1.5):
+            return
+        for _ in range(600):
+            dlg = _find_prompt(self._pid)
+            if dlg:
+                _bring_to_front(dlg)
+                if self.on_prompt:
+                    self.on_prompt()
+                return
+            if finished.wait(0.5):
+                return
+
     def _get_hwp(self):
         if self._hwp is None:
+            before = _hwp_pids()
             try:
                 import win32com.client
                 hwp = win32com.client.DispatchEx("HWPFrame.HwpObject")
@@ -152,6 +175,8 @@ class HwpWorker:
                 pass
             self.available = True
             self._hwp = hwp
+            mine = _hwp_pids() - before
+            self._pid = next(iter(mine)) if len(mine) == 1 else None
         return self._hwp
 
     def _quit(self):
@@ -220,6 +245,59 @@ class HwpWorker:
             out = CACHE_DIR / (Path(path).stem + "_prv.png")
             out.write_bytes(data)
             return [str(out)]
+
+
+def _hwp_pids() -> set[int]:
+    """실행 중인 한글(Hwp.exe) 프로세스 번호들."""
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Hwp.exe", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    pids = set()
+    for line in out.splitlines():
+        parts = line.split('","')
+        if len(parts) > 1 and parts[1].isdigit():
+            pids.add(int(parts[1]))
+    return pids
+
+
+def _find_prompt(pid: int | None):
+    """그 한글 프로세스가 띄운 '접근 허용' 창(제목이 '글'로 끝나는 작은 창)."""
+    if pid is None:
+        return None
+    import win32gui
+    import win32process
+    found = []
+
+    def enum(h, _):
+        if not win32gui.IsWindowVisible(h):
+            return True
+        if win32process.GetWindowThreadProcessId(h)[1] != pid:
+            return True
+        title = win32gui.GetWindowText(h)
+        if title.endswith("글") and " - " not in title:
+            found.append(h)
+        return True
+    try:
+        win32gui.EnumWindows(enum, None)
+    except Exception:
+        return None
+    return found[0] if found else None
+
+
+def _bring_to_front(h):
+    import win32con
+    import win32gui
+    try:
+        win32gui.ShowWindow(h, win32con.SW_SHOWNORMAL)
+        flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
+        win32gui.SetWindowPos(h, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+        win32gui.SetWindowPos(h, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+        win32gui.SetForegroundWindow(h)
+    except Exception:
+        pass
 
 
 def _key(path: str, dpi: int) -> str:
