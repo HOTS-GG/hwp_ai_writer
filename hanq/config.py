@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.1.0"
 
 if sys.platform == "darwin":
     APP_DIR = Path.home() / "Library" / "Application Support" / "HWP_AI_Writer"
@@ -19,10 +19,10 @@ CACHE_DIR = Path(tempfile.gettempdir()) / "HWP_AI_Writer"
 
 
 def resource_dir() -> Path:
-    """exe로 묶였을 때와 소스 실행 모두에서 기본 양식 폴더의 위치."""
+    """exe로 묶였을 때와 소스 실행 모두에서 forms·assets 폴더가 있는 위치."""
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-    return Path(__file__).parent
+    return Path(__file__).resolve().parent.parent
 
 
 BUILTIN_FORMS_DIR = resource_dir() / "forms"
@@ -64,6 +64,7 @@ DEFAULTS = {
     "auto_save": True,
     "open_after_save": False,
     "auto_preview": True,
+    "live_preview": True,
     "preview_dpi": 96,
     "preview_zoom": 100,
     "ref_max_chars": 30000,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from settings import APP_VERSION  # noqa: E402
+from hanq.config import APP_VERSION  # noqa: E402
 
 INFO_TEXT = """한큐(HanQ) {ver}
 

@@ -27,7 +27,7 @@ def main():
     except Exception:
         pass
 
-    from ui import App
+    from hanq.ui.app import App
 
     app = App()
     app.mainloop()

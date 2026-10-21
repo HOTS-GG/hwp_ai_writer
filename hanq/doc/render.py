@@ -9,15 +9,19 @@ import io
 import os
 import sys
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from hwpx_form import (CELLADDR, CELLSPAN, CELLSZ, HH, HP, P, PIC, RUN, SUBLIST, SZ, T, TBL, TC, TR,
-                       HwpxDoc, t_text)
+from .document import HwpxDocument
+from .xml import (CELLADDR, CELLSPAN, CELLSZ, DRAWTEXT, HC, HH, HP, P, PIC, RUN, SUBLIST, SZ, T, TBL, TC, TR,
+                  t_text)
 
-HC = "http://www.hancom.co.kr/hwpml/2011/core"
-DRAWTEXT = f"{{{HP}}}drawText"
+# 실시간 화면에서 '방금 쓴 줄'에 붙이는 표시 (미리보기용 사본에만 붙고 저장 파일에는 없다)
+FOCUS_ATTR = "hanqFocus"
+FOCUS_FILL = "#fff3b0"
+FOCUS_BAR = "#f59e0b"
 SHAPES = {f"{{{HP}}}{n}" for n in ("pic", "rect", "ellipse", "container", "polygon", "curve", "arc")}
 UNIT_PER_INCH = 7200
 
@@ -86,15 +90,31 @@ class _Styles:
         return self.paras.get(pid, {"align": "JUSTIFY", "left": 0, "indent": 0, "prev": 0, "next": 0, "spacing": 160})
 
 
+@dataclass
+class RenderResult:
+    pages: list            # PIL 이미지 (쪽마다)
+    focus_page: int | None  # 강조한 줄이 처음 나오는 쪽 (0부터)
+    focus_y: int | None     # 그 쪽에서의 세로 위치(px)
+
+
 class _Renderer:
-    def __init__(self, path: str, dpi: int):
-        self.doc = HwpxDoc(path)
-        self.zip = zipfile.ZipFile(path)
-        self.styles = _Styles(self.doc._header_root())
+    def __init__(self, source: str | bytes, dpi: int):
+        data = source if isinstance(source, (bytes, bytearray)) else None
+        self.doc = HwpxDocument(data=data) if data is not None else HwpxDocument(source)
+        self.zip = zipfile.ZipFile(io.BytesIO(data) if data is not None else source)
+        self.styles = _Styles(self.doc.header_root())
         self.scale = dpi / UNIT_PER_INCH
         self.pages: list[Image.Image] = []
         self._images: dict = {}
+        self.focus: tuple[int, int] | None = None
         self._new_page_size()
+
+    def _mark_focus(self, x0, y0, x1, y1):
+        """방금 쓴 곳을 노란 바탕과 왼쪽 주황 막대로 표시하고, 처음 위치를 기억한다."""
+        self.draw.rectangle([x0, y0, x1, y1], fill=FOCUS_FILL)
+        self.draw.rectangle([max(self.left - 10, 0), y0, max(self.left - 6, 2), y1], fill=FOCUS_BAR)
+        if self.focus is None:
+            self.focus = (len(self.pages) - 1, int(y0))
 
     def px(self, unit) -> int:
         return int(round(int(unit) * self.scale))
@@ -331,6 +351,9 @@ class _Renderer:
             fill = self.styles.fills.get(c["tc"].get("borderFillIDRef"))
             if fill:
                 self.draw.rectangle([c["x"], top, c["x2"], bot], fill=fill)
+            sl_ = c["tc"].find(SUBLIST)
+            if sl_ is not None and any(p.get(FOCUS_ATTR) for p in sl_.iterfind(P)):
+                self._mark_focus(c["x"], top, c["x2"], bot)
             left, up, right, down = self.styles.borders.get(c["tc"].get("borderFillIDRef"), [True] * 4)
             for on, xy in ((left, [c["x"], top, c["x"], bot]), (up, [c["x"], top, c["x2"], top]),
                            (right, [c["x2"], top, c["x2"], bot]), (down, [c["x"], bot, c["x2"], bot])):
@@ -361,6 +384,8 @@ class _Renderer:
                 placed, h = self._layout(p, width)
                 if any(ln for _, _, ln in placed):
                     self._need(h)
+                    if p.get(FOCUS_ATTR):
+                        self._mark_focus(self.left - 2, self.y, self.right + 2, self.y + h)
                     self._draw_lines(placed, self.left, self.y)
                     self.y += h
                 objs = [o for run in p.iterfind(RUN) for o in run if o.tag != T]
@@ -384,6 +409,14 @@ class _Renderer:
         if not self.pages:
             self._page()
         return self.pages
+
+
+def render(source: str | bytes, dpi: int = 96) -> RenderResult:
+    """hwpx 파일 경로나 바이트를 그려 쪽 이미지(메모리)와 강조 위치를 돌려준다."""
+    r = _Renderer(source, dpi)
+    pages = r.render()
+    fp, fy = r.focus if r.focus else (None, None)
+    return RenderResult(pages, fp, fy)
 
 
 def render_pages(path: str, dpi: int, out_dir: Path) -> list[str]:

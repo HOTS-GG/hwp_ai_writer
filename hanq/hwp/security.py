@@ -11,7 +11,7 @@ except ImportError:  # 맥: 레지스트리도 한글 COM도 없다
     winreg = None
 from pathlib import Path
 
-from settings import APP_DIR, resource_dir
+from ..config import APP_DIR, resource_dir
 
 MODULE_NAME = "FilePathCheckerModule"
 REG_PATH = r"Software\HNC\HwpAutomation\Modules"
