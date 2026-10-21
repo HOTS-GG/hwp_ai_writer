@@ -77,6 +77,7 @@ def find_cli(provider: str) -> str | None:
 
 
 def _run_cli(cmd: list[str], stdin_text: str, timeout: int, on_progress, cwd: str):
+    import os
     import subprocess
     import threading
     import time
@@ -108,7 +109,13 @@ def _run_cli(cmd: list[str], stdin_text: str, timeout: int, on_progress, cwd: st
         hint = ""
         low = (out + err).lower()
         if "login" in low or "auth" in low or "credential" in low:
-            hint = "\n\n로그인이 필요합니다. 명령 프롬프트(맥은 터미널)에서 한 번 실행해 로그인해 주세요."
+            from platform_util import IS_MAC
+            name = CLI_NAMES.get("claude_code" if "claude" in os.path.basename(cmd[0]).lower() else "codex")
+            if IS_MAC:
+                hint = (f"\n\n로그인이 필요합니다. 터미널을 열고  {name}  를 실행해 로그인한 뒤 다시 시도해 주세요."
+                        "\n(Claude·ChatGPT 데스크톱 앱의 로그인과는 따로입니다.)")
+            else:
+                hint = "\n\n로그인이 필요합니다. 명령 프롬프트에서 한 번 실행해 로그인해 주세요."
         raise LLMError(f"{cmd[0]} 실행 오류 (코드 {proc.returncode})\n{(err or out).strip()[:600]}{hint}")
     return out
 
