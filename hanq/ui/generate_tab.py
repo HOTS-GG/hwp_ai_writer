@@ -88,18 +88,19 @@ class GenerateTab:
         self._request.pack(fill="both", expand=True, padx=14, pady=(6, 12))
         self._request.insert("1.0", EXAMPLE_REQUEST)
 
-        tk.Label(c3, text="공문, 지난 계획서, 안내문 등 (HWP·HWPX·PDF·DOCX·TXT)\n두 번 누르면 읽어 낸 내용을 미리 볼 수 있습니다.",
+        tk.Label(c3, text="공문, 지난 계획서, 안내문 등 (HWP·HWPX·PDF·DOCX·TXT)\n두 번 누르면 문서를 미리 볼 수 있습니다.",
                  bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
         self._ref_list = tk.Listbox(c3, height=3, bg=INPUT_BG, fg=TEXT, relief="flat", font=FONT_SM,
                                     highlightthickness=1, highlightbackground=BORDER,
                                     selectbackground=SOFT, selectforeground=TEXT, activestyle="none")
         self._ref_list.pack(fill="x", padx=14, pady=(6, 6))
-        self._ref_list.bind("<Double-Button-1>", lambda e: self._show_ref())
+        self._ref_list.bind("<Double-Button-1>", lambda e: self._show_ref_doc())
         rrow = tk.Frame(c3, bg=CARD)
         rrow.pack(fill="x", padx=14, pady=(0, 12))
         button(rrow, "추가…", self._add_ref).pack(side="left")
-        button(rrow, "내용 보기", self._show_ref).pack(side="left", padx=6)
-        button(rrow, "선택 제거", self._remove_ref).pack(side="left")
+        button(rrow, "문서 보기", self._show_ref_doc).pack(side="left", padx=(6, 0))
+        button(rrow, "AI에 보낼 글", self._show_ref).pack(side="left", padx=6)
+        button(rrow, "제거", self._remove_ref).pack(side="left")
 
     # ── 양식 ────────────────────────────────────────────────────────────
     def _all_forms(self):
@@ -169,7 +170,20 @@ class GenerateTab:
             self._ref_list.delete(i)
             del self.refs[i]
 
+    def _show_ref_doc(self):
+        """참고 자료를 문서 모양 그대로 미리 본다 (HWPX는 바로, HWP는 한글로, 그 밖은 글로)."""
+        sel = self._ref_list.curselection()
+        if not sel:
+            return
+        path = self.refs[sel[0]]
+        if not path.lower().endswith((".hwpx", ".hwp", ".pdf")):
+            self._show_ref()
+            return
+        self.preview.set_title(f"참고 자료 — {Path(path).name}")
+        self.app.preview_file(self.preview, path)
+
     def _show_ref(self):
+        """AI에게 실제로 보내는 글(표는 '| 칸 |' 줄)을 보여준다."""
         sel = self._ref_list.curselection()
         if not sel:
             return

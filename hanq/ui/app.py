@@ -245,11 +245,11 @@ class App(tk.Tk):
             except OSError as e:
                 pane.show_message(f"파일을 읽을 수 없습니다: {e}")
                 return
-        elif not pane.has_pages:
+        else:   # HWP: 앞 문서 화면이 남아 헷갈리지 않게 비운다
             pane.show_message("한글로 쪽 이미지를 만드는 중…")
         if not (IS_WIN and self.s.get("auto_preview", True)):
             if not is_hwpx:
-                pane.show_message("HWP 미리보기는 윈도우용 한글이 있어야 합니다.")
+                self._show_text_instead(pane, path, "HWP 문서 모양 미리보기는 윈도우용 한글이 있어야 합니다")
             return
         pane.set_note("한글로 정확한 미리보기 만드는 중…")
 
@@ -264,9 +264,19 @@ class App(tk.Tk):
                     pane.set_note("빠른 미리보기 (실제 한글 화면과 조금 다를 수 있음)")
                     self.status(err[:120])
                     if not is_hwpx:
-                        pane.show_message(err)
+                        self._show_text_instead(pane, path, err)
             self.after(0, apply)
         self.worker.render(path, int(self.s.get("preview_dpi", 96)), done)
+
+    def _show_text_instead(self, pane, path: str, why: str):
+        """한글로 쪽 모양을 못 그릴 때(HWP): 읽어 낸 글이라도 보여준다."""
+        from ..readers import read_reference
+        try:
+            text = read_reference(path)
+        except Exception as e:
+            pane.show_message(f"{why}\n({e})")
+            return
+        pane.show_text(text[:30000], "글만 표시 — 한글 미리보기를 만들지 못함")
 
     # ── 한글 변환 ───────────────────────────────────────────────────────
     def convert_hwp(self, src: str, on_done, out_dir: Path | None = None):
