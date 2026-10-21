@@ -201,18 +201,23 @@ EDIT_SYSTEM = f"""당신은 한국 학교·공공기관 문서 편집 도우미�
 입력 문서 구조:
 - [S번호] : 문서의 한 줄(또는 한 칸). 고치려면 줄 전체를 새 텍스트로 돌려줌
 - [T번호] 표 : 머리행 아래의 행들. 표를 고칠 때는 그 표의 '전체 행'을 열 순서대로 돌려줌(행 추가·삭제 가능)
+- [H번호] 장 제목, [I번호] 그림(직인·로고·사진 등)
 - '│'로 시작하는 줄은 표 칸 안의 내용
 
 출력: JSON 객체 하나만.
 {{"reply": "무엇을 바꿨는지 한두 문장으로", "slots": {{"S12": "고친 줄"}}, "tables": {{"T2": [["칸", "칸"]]}},
-  "inserts": [], "styles": [], "new_sections": [], "deletes": []}}
+  "inserts": [], "styles": [], "new_sections": [], "deletes": [], "moves": [], "replace_all": []}}
 - 바꾼 것만 넣음. 쓰지 않는 항목은 빼도 됨
 - 원래 줄의 앞쪽 공백과 번호 체계(1. / 가. / ❍ / - 등)를 유지
 - 줄을 뒤에 추가하려면 해당 줄 값에 \\n으로 이어 쓰고, 번호를 이어감 (예: "  2. 기존 내용\\n  3. 새 내용")
 - 줄을 지우려면 ""
-- 장(제목 상자와 그 아래 내용 전체)을 지우려면 "deletes": ["H8"], 표 전체(머리행 포함)를 지우려면 "deletes": ["T3"]
+- 통째로 지우기 "deletes": ["H8"] 장 전체(제목 상자와 그 아래 내용), ["T3"] 표 전체(머리행 포함), ["I2"] 그림
   (장 제목 상자 칸이나 표 행을 ""로 비우면 빈 상자·빈 행이 남으므로, 통째로 지울 때는 반드시 deletes를 씀.
-   지운 뒤 남은 장 번호는 프로그램이 다시 매김)
+   지우거나 옮긴 뒤 장 번호는 프로그램이 다시 매김)
+- 옮기기 "moves": [{{"block": "H3", "after": "H5"}}, {{"block": "S12", "before": "S4"}}]
+  block이 H면 장 전체, S·T·I면 그 줄(표·그림이 든 줄). after에 H를 쓰면 그 장의 끝 뒤로, before에 H를 쓰면 그 장 앞으로
+- 문서 전체에서 같은 글자를 한꺼번에 바꾸기 "replace_all": [{{"find": "2025학년도", "replace": "2026학년도"}}]
+  (여러 곳에 흩어진 같은 표현을 바꿀 때 slots 대신 씀)
 - reply에는 실제로 JSON에 넣은 변경만 적음. 넣지 않은 변경을 했다고 말하지 않음
 - 요청이 모호하거나 문서에 해당 부분이 없으면 slots와 tables를 비우고 reply에 무엇이 필요한지 물음
 - 장 제목 번호 박스(숫자 1, 2, 3…)는 바꾸지 않음
@@ -232,7 +237,9 @@ EDIT_SYSTEM = f"""당신은 한국 학교·공공기관 문서 편집 도우미�
 - "styles": [{{"target": "S12", "color": "#FF0000"}}, {{"target": "S15", "part": "강조할 글자", "bold": true, "underline": true}}]
 - target은 S번호 또는 H번호(장 제목). part를 쓰면 그 줄 안의 그 글자만, 없으면 줄 전체
 - color·background는 #RRGGBB, size는 포인트(예: 12), bold/italic/underline은 true/false
-- 글자 모양만 바꿀 때는 slots에 그 줄을 넣지 않음
+- 문단 모양도 같은 styles로: "align": "left|center|right|justify", "line_spacing": 줄 간격 %(예: 130),
+  "page_break": true(그 줄·장 앞에서 쪽 나누기) / false(쪽 나누기 없애기). 이때 part는 쓰지 않음
+- 글자·문단 모양만 바꿀 때는 slots에 그 줄을 넣지 않음
 
 {NEW_SECTION_RULE}
 
@@ -260,17 +267,22 @@ def edit_document(path: str, out_path: str, instruction: str, history: list[tupl
     new_sections = data.get("new_sections") or []
     inserts = data.get("inserts") or []
     styles = data.get("styles") or []
-    deletes = [d for d in (data.get("deletes") or []) if str(d).strip() in doc.headings or str(d).strip() in doc.tables]
+    deletes = [d for d in (data.get("deletes") or [])
+               if str(d).strip() in doc.headings or str(d).strip() in doc.tables or str(d).strip() in doc.images]
+    moves = [m for m in (data.get("moves") or []) if isinstance(m, dict)]
+    replace_all = [r for r in (data.get("replace_all") or []) if isinstance(r, dict)]
     changed = 0
     unchanged = False
     missed = []
     dropped = [k for k in (data.get("slots") or {}) if k not in doc.slots]
+    dropped += [str(d) for d in (data.get("deletes") or []) if d not in deletes]
     if dropped:
         missed.append(f"없는 줄 번호 {', '.join(dropped[:5])}")
-    if slots or tables or new_sections or inserts or styles or deletes:
+    if slots or tables or new_sections or inserts or styles or deletes or moves or replace_all:
         status("문서에 반영 중…")
-        r = doc.fill(slots, tables, new_sections, inserts, styles, deletes)
-        changed = len(slots) + len(tables) + r["sections"] + r["inserted"] + r["styled"] + r["deleted"]
+        r = doc.fill(slots, tables, new_sections, inserts, styles, deletes, moves, replace_all)
+        changed = (len(slots) + len(tables) + r["sections"] + r["inserted"] + r["styled"] + r["deleted"]
+                   + r["moved"] + r["replaced"])
         want_lines = sum(len(i.get("lines") or []) for i in inserts if isinstance(i, dict))
         if r["inserted"] < want_lines:
             missed.append(f"끼워 넣을 줄 {want_lines - r['inserted']}개")
@@ -278,6 +290,10 @@ def edit_document(path: str, out_path: str, instruction: str, history: list[tupl
             missed.append(f"글자 모양 {len(styles) - r['styled']}곳")
         if r["sections"] < len(new_sections):
             missed.append(f"새 장 {len(new_sections) - r['sections']}개")
+        if r["moved"] < len(moves):
+            missed.append(f"옮기기 {len(moves) - r['moved']}건")
+        if replace_all and not r["replaced"]:
+            missed.append("찾아 바꿀 글자")
         # AI가 같은 글자를 그대로 돌려준 경우: 고쳤다고 답해도 실제로는 바뀐 게 없다
         if changed and doc.snapshot() == before:
             changed = 0
