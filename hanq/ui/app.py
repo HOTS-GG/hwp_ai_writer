@@ -118,6 +118,10 @@ class App(tk.Tk):
     def register_pane(self, pane):
         self._panes.append(pane)
 
+    def unregister_pane(self, pane):
+        if pane in self._panes:
+            self._panes.remove(pane)
+
     def on_busy_change(self, fn):
         self._busy_listeners.append(fn)
 

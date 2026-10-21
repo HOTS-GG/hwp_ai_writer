@@ -170,27 +170,46 @@ class GenerateTab:
             self._ref_list.delete(i)
             del self.refs[i]
 
-    def _show_ref_doc(self):
-        """참고 자료를 문서 모양 그대로 미리 본다 (HWPX는 바로, HWP는 한글로, 그 밖은 글로)."""
+    def _ref_window(self, path: str) -> PreviewPane:
+        """참고 자료는 따로 뜨는 창에서 본다 (생성 결과 미리보기는 그대로 둔다). 창은 하나를 다시 쓴다."""
+        win = getattr(self, "_ref_win", None)
+        if win is None or not win.winfo_exists():
+            win = tk.Toplevel(self.app)
+            win.geometry("820x900")
+            win.configure(bg=BG)
+            pane = PreviewPane(win, "참고 자료", self.app.s.get("preview_zoom", 100))
+            pane.pack(fill="both", expand=True, padx=10, pady=10)
+            self.app.register_pane(pane)
+            win.protocol("WM_DELETE_WINDOW", lambda: (self.app.unregister_pane(pane), win.destroy()))
+            self._ref_win, self._ref_pane = win, pane
+        win.title(f"참고 자료 — {Path(path).name}")
+        self._ref_pane.set_title(Path(path).name)
+        win.deiconify()
+        win.lift()
+        return self._ref_pane
+
+    def _selected_ref(self) -> str | None:
         sel = self._ref_list.curselection()
-        if not sel:
+        return self.refs[sel[0]] if sel else None
+
+    def _show_ref_doc(self):
+        """참고 자료를 문서 모양 그대로 미리 본다 (HWPX·HWP는 문서 모양, 그 밖은 글로)."""
+        path = self._selected_ref()
+        if not path:
             return
-        path = self.refs[sel[0]]
         if not path.lower().endswith((".hwpx", ".hwp", ".pdf")):
             self._show_ref()
             return
-        self.preview.set_title(f"참고 자료 — {Path(path).name}")
-        self.app.preview_file(self.preview, path, original=True)
+        self.app.preview_file(self._ref_window(path), path, original=True)
 
     def _show_ref(self):
         """AI에게 실제로 보내는 글(표는 '| 칸 |' 줄)을 보여준다."""
-        sel = self._ref_list.curselection()
-        if not sel:
+        path = self._selected_ref()
+        if not path:
             return
-        path = self.refs[sel[0]]
-        self.preview.token = None
-        self.preview.set_title(f"참고 자료 — {Path(path).name}")
-        self.preview.show_message("읽는 중…")
+        pane = self._ref_window(path)
+        pane.token = None
+        pane.show_message("읽는 중…")
 
         def run():
             from ..readers import read_reference
@@ -199,7 +218,7 @@ class GenerateTab:
                 note = f"AI에게 보내는 내용 · {len(text):,}자"
             except Exception as e:
                 text, note = f"읽을 수 없습니다: {e}", ""
-            self.app.after(0, lambda: self.preview.show_text(text[:30000], note))
+            self.app.after(0, lambda: pane.show_text(text[:30000], note))
         threading.Thread(target=run, daemon=True).start()
 
     # ── 생성 ────────────────────────────────────────────────────────────
