@@ -51,17 +51,43 @@ VIAddVersionKey "LegalCopyright" "HanQ"
 
 !insertmacro MUI_LANGUAGE "Korean"
 
+!define INNO_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\{6E3B1C2A-8F4D-4C7B-9A51-2D7E0B9C4F11}_is1"
+
+; 기존 설치를 지운다 (프로그램 파일만 — 설정·API 키·내 양식은 AppData\Roaming에 있어 그대로 남는다).
+; 예전 버전 파일이 섞여 남지 않도록 새로 설치하기 전에 폴더째 비운다.
+; 폴더 $R0에 한큐가 있을 때만 폴더째 지운다 (잘못된 경로로 다른 파일을 지우지 않게)
+Function RemoveIfHanQ
+  StrCmp $R0 "" done
+  IfFileExists "$R0\${APPEXE}" 0 done
+    DetailPrint "이전 버전 지우는 중: $R0"
+    RMDir /r "$R0"
+  done:
+FunctionEnd
+
+Function RemoveOldInstall
+  ; 1) NSIS로 설치한 이전 버전 (설치 위치를 바꿨을 수 있으니 기록된 위치도 본다)
+  ReadRegStr $R0 HKCU "${UNINST_KEY}" "InstallLocation"
+  Call RemoveIfHanQ
+  DeleteRegKey HKCU "${UNINST_KEY}"
+  ; 2) Inno Setup으로 설치한 1.1.0 이하
+  ReadRegStr $R0 HKCU "${INNO_KEY}" "InstallLocation"
+  Call RemoveIfHanQ
+  DeleteRegKey HKCU "${INNO_KEY}"
+  Delete "$SMPROGRAMS\한큐 HanQ\한큐 HanQ.lnk"
+  RMDir "$SMPROGRAMS\한큐 HanQ"
+  ; 3) 지금 설치할 폴더에 남은 이전 버전
+  StrCpy $R0 "$INSTDIR"
+  Call RemoveIfHanQ
+FunctionEnd
+
 Section "한큐 (필수)" SecMain
   SectionIn RO
-  ; 실행 중인 한큐가 있으면 파일을 덮어쓸 수 없으므로 먼저 닫는다
+  ; 실행 중인 한큐가 있으면 파일을 지울 수 없으므로 먼저 닫는다
   nsExec::Exec 'taskkill /IM ${APPEXE} /F'
+  Sleep 500
+  Call RemoveOldInstall
   SetOutPath "$INSTDIR"
   File /r "..\dist\HanQ\*"
-  ; 예전 Inno Setup 설치(1.1.0까지)의 제거 정보·제거 프로그램 정리
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{6E3B1C2A-8F4D-4C7B-9A51-2D7E0B9C4F11}_is1"
-  Delete "$INSTDIR\unins000.exe"
-  Delete "$INSTDIR\unins000.dat"
-  Delete "$SMPROGRAMS\한큐 HanQ\한큐 HanQ.lnk"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${APPEXE}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APPNAME}"
@@ -83,6 +109,10 @@ Section "Uninstall"
   nsExec::Exec 'taskkill /IM ${APPEXE} /F'
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
   Delete "$DESKTOP\${APPNAME}.lnk"
-  RMDir /r "$INSTDIR"
+  ; 한큐가 들어 있는 폴더일 때만 통째로 지운다 (다른 파일이 있는 폴더에 설치했을 때를 대비)
+  IfFileExists "$INSTDIR\${APPEXE}" 0 +3
+    RMDir /r "$INSTDIR"
+    Goto +2
+    Delete "$INSTDIR\uninstall.exe"
   DeleteRegKey HKCU "${UNINST_KEY}"
 SectionEnd
