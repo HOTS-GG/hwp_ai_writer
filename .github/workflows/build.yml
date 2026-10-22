@@ -36,11 +36,11 @@ jobs:
           pip install -r requirements.txt pyinstaller
       - name: Unit tests
         run: python -m unittest discover -s tests -t . -v
-      - name: Install Inno Setup
+      - name: Install NSIS
         shell: pwsh
         run: |
-          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
-            choco install innosetup -y --no-progress
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis -y --no-progress
           }
       - name: Build exe + installer
         run: python build_installer.py
