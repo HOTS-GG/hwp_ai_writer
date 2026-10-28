@@ -133,6 +133,39 @@ class AnnotateTest(unittest.TestCase):
         self.assertIn("○○○○", s.describe())
 
 
+class TemplatizeTest(unittest.TestCase):
+    def test_filled_document_becomes_blank_template(self):
+        import json
+        from hanq.ai import AIConfig
+        from hanq.doc import Editor, HwpxDocument, Outline
+        from hanq.services import Job, templatize
+        from hanq.services import stream as stream_mod
+        from tests.helpers import PLAN_FORM, find_line
+        from tests.test_services import fake_complete
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        # 행사명이 채워진 '완성 문서'를 만든다
+        doc = HwpxDocument(PLAN_FORM)
+        o = Outline(doc, edit=True)
+        Editor(doc, o).fill_line(find_line(o, "행사명"), "  1. 행사명: 2025 과학 탐구 축전")
+        filled = tmp / "작년 계획서.hwpx"
+        doc.save(str(filled))
+        lid = find_line(Outline(HwpxDocument(str(filled)), edit=True), "과학 탐구 축전")
+
+        answer = json.dumps({"reply": "행사명을 빈칸으로 바꿈", "slots": {lid: "  1. 행사명: ○○○○"}}, ensure_ascii=False)
+        out = tmp / "양식.hwpx"
+        stream_mod.LineStreamer.SCAN_INTERVAL = 0
+        with mock.patch.object(stream_mod, "complete", fake_complete(answer)):
+            res = templatize(Job(frame_interval=0), str(filled), str(out),
+                             AIConfig(provider="claude", api_key="test", model="test"))
+        text = HwpxDocument(str(out)).plain_text()
+        self.assertEqual(res.changed, 1)
+        self.assertIn("행사명: ○○○○", text)
+        self.assertNotIn("과학 탐구 축전", text)
+        self.assertIn("행사명을 빈칸으로", res.reply)
+
+
 @unittest.skipUnless(sys.platform == "win32", "가짜 CLI는 윈도우 .cmd로 만든다")
 class CliStatusTest(unittest.TestCase):
     def _fake(self, body: str) -> str:

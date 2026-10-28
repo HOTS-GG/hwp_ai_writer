@@ -38,6 +38,7 @@ hanq/
     context.py              요청·기본 정보·참고 자료를 AI 입력으로 묶음
     generate.py             양식 채우기 / 새 문서 조립 (받는 대로 문서에 반영)
     edit.py                 대화 수정
+    templatize.py           완성 문서 → 해마다 바뀌는 부분만 ○○○○로 바꾼 재사용 양식
     live.py                 LiveView: 바뀐 문서를 간이 렌더러로 그려 화면에 보냄
 
   hwp/                      ── 윈도우용 한글 COM ──

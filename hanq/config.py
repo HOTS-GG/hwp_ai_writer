@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 if sys.platform == "darwin":
     APP_DIR = Path.home() / "Library" / "Application Support" / "HWP_AI_Writer"

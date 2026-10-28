@@ -3,6 +3,7 @@ from .edit import EditResult, edit_document
 from .generate import Result, build_document, describe_form, fill_form
 from .job import Job
 from .live import LiveView
+from .templatize import TemplatizeResult, templatize
 
 __all__ = ["Job", "LiveView", "Result", "EditResult", "fill_form", "build_document", "edit_document",
-           "describe_form"]
+           "describe_form", "templatize", "TemplatizeResult"]

@@ -51,9 +51,13 @@ class FormsTab:
         row.pack(fill="x", pady=(6, 0))
         button(row, "양식 추가…", self._add).pack(side="left", fill="x", expand=True)
         button(row, "삭제", self._delete, "danger").pack(side="left", padx=(6, 0))
+        self._tpl_btn = button(btns, "완성 문서를 양식으로…", self._templatize_selected)
+        self._tpl_btn.pack(fill="x", pady=(6, 0))
         button(btns, "내 양식 폴더 열기", self._open_dir).pack(fill="x", pady=(6, 0))
-        tk.Label(btns, text="HWPX·HWP·PDF 양식을 추가할 수 있습니다.\n○○○○ 같은 빈칸이 있으면 그 자리만 채웁니다.",
+        tk.Label(btns, text="HWPX·HWP·PDF 양식을 추가할 수 있습니다.\n○○○○ 같은 빈칸이 있으면 그 자리만 채웁니다.\n"
+                            "작년 계획서 같은 완성 문서는 [완성 문서를 양식으로…]로\n바뀌는 부분만 빈칸으로 만들 수 있습니다.",
                  bg=BG, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", pady=(8, 0))
+        app.on_busy_change(lambda busy: self._tpl_btn.configure(state="disabled" if busy else "normal"))
 
         self.preview = PreviewPane(right, "미리보기", app.s.get("preview_zoom", 100))
         self.preview.pack(fill="both", expand=True)
@@ -122,13 +126,21 @@ class FormsTab:
         if req != self._req:
             return   # 그 사이 다른 양식을 골랐다
         self._info.set(f"{where}\n\n{summary.describe()}")
-        if getattr(self, "_announce", None):
+        announced = getattr(self, "_announce", None)
+        if announced:
             self._announce = None
             if summary.fill_lines == 0 and summary.tables == 0:
                 messagebox.showinfo("채울 곳을 찾지 못했습니다",
                                     "이 양식에서 AI가 채울 빈칸을 찾지 못했습니다.\n\n"
                                     "한글에서 양식을 열어 내용이 들어갈 자리에 ○○○○를 적고 저장한 뒤 다시 추가하면,\n"
                                     "그 자리만 채우고 나머지 서식은 그대로 둡니다.")
+            elif not summary.has_placeholders and messagebox.askyesno(
+                    "완성 문서입니다",
+                    "이 문서에는 ○○○○ 같은 빈칸이 없습니다.\n\n"
+                    "AI가 날짜·장소·인원·내용처럼 해마다 바뀌는 부분만 빈칸으로 바꾼 '양식'으로 만들까요?\n"
+                    "(서식과 제목·항목명은 그대로 둡니다. 저장하기 전에 결과를 보여 드립니다.)\n\n"
+                    "[아니요]를 누르면 지금 문서를 그대로 양식으로 씁니다 (매번 모든 문장을 새로 씀)."):
+                self.after_idle_templatize(announced)
         if out is not None:
             self.app.preview_file(self.preview, str(out), note="AI가 채울 곳을 색으로 표시함 (실제 문서에는 색이 없음)")
 
@@ -142,6 +154,16 @@ class FormsTab:
     def _add(self):
         paths = filedialog.askopenfilenames(title="양식 추가",
                                             filetypes=[("양식", "*.hwpx *.hwp *.pdf"), ("모든 파일", "*.*")])
+        if not paths:
+            return
+        bad = [Path(p).name for p in paths if Path(p).suffix.lower() not in (".hwpx", ".hwp", ".pdf")]
+        paths = [p for p in paths if Path(p).suffix.lower() in (".hwpx", ".hwp", ".pdf")]
+        if bad:
+            messagebox.showwarning(
+                "양식으로 쓸 수 없는 파일",
+                "양식은 한글 파일(HWPX·HWP)과 PDF만 쓸 수 있습니다. 아래 파일은 추가하지 않았습니다.\n\n"
+                + "\n".join(f"• {n}" for n in bad[:10])
+                + "\n\nWord·엑셀 문서는 한글에서 열어 [다른 이름으로 저장 → HWPX]로 바꾼 뒤 추가해 주세요.")
         if not paths:
             return
         udir = Path(self.app.s["user_forms_dir"])
@@ -181,6 +203,86 @@ class FormsTab:
             Path(f["path"]).unlink(missing_ok=True)
             self.app.reload_forms()
             self.preview.show_message("미리볼 양식을 선택하세요.")
+
+    # ── 완성 문서 → 빈칸 양식 ──
+    def after_idle_templatize(self, path: str):
+        self.app.after(100, lambda: self._templatize(path))
+
+    def _templatize_selected(self):
+        f = self._selected()
+        if not f:
+            messagebox.showinfo("양식 고르기", "왼쪽 목록에서 양식으로 만들 완성 문서를 고르세요.\n"
+                                           "(목록에 없으면 먼저 [양식 추가…]로 넣으세요)")
+            return
+        if f["kind"] != "hwpx":
+            messagebox.showinfo("HWPX만 가능", "PDF는 빈칸 양식으로 바꿀 수 없습니다. 한글 파일(HWPX·HWP)을 넣어 주세요.")
+            return
+        self._templatize(f["path"])
+
+    def _templatize(self, path: str):
+        ai = self.app.ai_config()
+        if not self.app.check_ai(ai):
+            return
+        src = Path(path)
+        udir = Path(self.app.s["user_forms_dir"])
+        udir.mkdir(parents=True, exist_ok=True)
+        stem = src.stem[:-3] if src.stem.endswith("_양식") else src.stem
+        target = udir / f"{stem}_양식.hwpx"
+        i = 2
+        while target.exists():
+            target = udir / f"{stem}_양식 ({i}).hwpx"
+            i += 1
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE_DIR / f"templatize_{src.stem}.hwpx"
+        tmp.unlink(missing_ok=True)
+        self.preview.set_title(f"양식으로 만드는 중 — {src.name}")
+        self._info.set(f"{src.name}\n\nAI가 해마다 바뀌는 부분을 찾아 ○○○○로 바꾸고 있습니다…")
+
+        def work(job):
+            from ..services import templatize
+            return templatize(job, str(src), str(tmp), ai)
+
+        def done(res):
+            if not res.changed or not tmp.exists():
+                self._info.set(f"{src.name}\n\n바꿀 부분을 찾지 못했습니다. {res.reply}")
+                messagebox.showinfo("양식으로 만들지 못했습니다", "AI가 빈칸으로 바꿀 부분을 찾지 못했습니다.\n" + res.reply)
+                return
+            self._req += 1
+            self._show_analysis_then_ask(src, tmp, target, res)
+
+        def failed(msg, cancelled):
+            self._info.set(f"{src.name}\n\n{'중단했습니다.' if cancelled else '실패: ' + msg[:200]}")
+            if not cancelled:
+                messagebox.showerror("양식으로 만들지 못했습니다", msg[:600])
+
+        self.app.run_job(work, done, failed, pane=self.preview)
+
+    def _show_analysis_then_ask(self, src: Path, tmp: Path, target: Path, res):
+        """만든 양식을 형광펜으로 보여 준 뒤, 저장할지 묻는다."""
+        from ..doc.annotate import annotate
+        try:
+            data, summary = annotate(str(tmp))
+            view = CACHE_DIR / f"highlight_{tmp.stem}.hwpx"
+            view.write_bytes(data)
+        except Exception:
+            summary, view = None, tmp
+        self.preview.set_title(f"새 양식 미리보기 — {target.name}")
+        self.app.preview_file(self.preview, str(view), note="노랑 = 이번에 빈칸으로 바꾼 곳 (저장 전 확인)")
+        desc = summary.describe() if summary else ""
+        self._info.set(f"새 양식 (아직 저장 안 함)\n{res.reply}\n\n{desc}")
+        self.app.after(1200, lambda: self._ask_save(tmp, target, summary))
+
+    def _ask_save(self, tmp: Path, target: Path, summary):
+        blanks = summary.fill_lines if summary else 0
+        if messagebox.askyesno("양식 저장", f"빈칸 {blanks}곳이 있는 양식을 만들었습니다.\n"
+                                           f"미리보기를 확인하고, '{target.name}'(으)로 내 양식에 저장할까요?"):
+            shutil.copyfile(tmp, target)
+            self.app.reload_forms()
+            self.select_path(str(target))
+            self.app.status(f"새 양식 저장: {target.name}")
+        else:
+            self.app.status("새 양식을 저장하지 않았습니다.")
+            self._on_select()
 
     def _open_dir(self):
         d = Path(self.app.s["user_forms_dir"])
