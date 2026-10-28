@@ -89,9 +89,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Read version
         id: ver
         run: echo "version=$(python3 -c "from hanq.config import APP_VERSION; print(APP_VERSION)")" >> "$GITHUB_OUTPUT"
+      # 패치 노트 = 버전을 올린 커밋의 제목 (그 뒤에 작은 수정 커밋이 붙어도 바뀌지 않게)
+      - name: Release notes
+        id: notes
+        run: echo "subject=$(git log -1 --format=%s -G 'APP_VERSION' -- hanq/config.py)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           path: out
@@ -104,10 +110,10 @@ jobs:
           make_latest: true
           overwrite_files: true
           files: out/*
-          # '바뀐 점'은 한큐 안의 업데이트 알림 창에도 그대로 보인다 (커밋 메시지)
+          # '바뀐 점'은 한큐 안의 업데이트 알림 창에도 그대로 보인다 (버전을 올린 커밋의 제목)
           body: |
             ## 바뀐 점
-            ${{ github.event.head_commit.message }}
+            ${{ steps.notes.outputs.subject }}
 
             ## 내려받기
             아래 **Assets**에서 내 컴퓨터에 맞는 파일 하나만 받으세요.
