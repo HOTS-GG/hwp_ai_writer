@@ -41,6 +41,9 @@ class Outline:
         self._top_index = 0
         self._cur_page = None
         self.has_placeholders = False if edit else bool(PLACEHOLDER.search(doc.plain_text()))
+        # 표지·머리 부분(첫 장 제목 앞)의 교훈·슬로건·주소는 학교 고정 문구라 '예시문'으로 내놓지 않는다
+        self._in_body = not any(heading_parts(p) is not None
+                                for root in doc.ordered_sections() for p in root.iterchildren(P))
         for root in doc.ordered_sections():
             self._walk(root, "")
         if page_map:
@@ -110,6 +113,7 @@ class Outline:
                     continue
                 hp_ = heading_parts(p)
                 if hp_ is not None:
+                    self._in_body = True
                     hid = f"H{len(self.headings) + 1}"
                     self.headings[hid] = p
                     self._out.append(f"[{hid}] ===== 장 {cell_text(hp_[1])}. {cell_text(hp_[2])} =====")
@@ -117,7 +121,7 @@ class Outline:
             if text.strip():
                 if not self.has_placeholders or PLACEHOLDER.search(text):
                     self._add_line(p, text, prefix)
-                elif len(text.strip()) >= 10 and not prefix:
+                elif len(text.strip()) >= 10 and not prefix and self._in_body:
                     self._add_line(p, f"(예시문) {text}", prefix, kind="E")
                 else:
                     self._out.append(f"{prefix}(고정) {text}")

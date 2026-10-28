@@ -54,6 +54,9 @@ def main():
         "--add-data", f"{HERE / 'assets' / 'icon.ico'}{sep}assets",
         "--add-data", f"{HERE / 'THIRD_PARTY_NOTICES.md'}{sep}.",
         *(["--add-data", f"{HERE / 'tools' / 'rhwp'}{sep}tools/rhwp"] if rhwp_ok else []),
+        # 한글 보안 승인 모듈(assets/security/*.dll)이 있으면 함께 넣어, 설치 후 '접근 허용' 창 없이 쓰게 한다
+        *(["--add-data", f"{HERE / 'assets' / 'security'}{sep}security"]
+          if IS_WIN and list((HERE / "assets" / "security").glob("*.dll")) else []),
         f"--icon={icon}",
         "--hidden-import", "PIL.ImageTk",
         # 예전 RAG 버전의 무거운 라이브러리가 끌려 들어가지 않게 제외

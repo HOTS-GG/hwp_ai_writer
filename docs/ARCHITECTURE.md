@@ -10,6 +10,7 @@ main.py                     진입점 (.env 읽기, 앱 ID, App 실행)
 hanq/
   config.py                 버전, 설정 파일(settings.json) 읽기/쓰기, 경로
   system.py                 윈도우/맥 차이 (글꼴, 파일 열기, 휠, CLI 환경변수)
+  updater.py                GitHub 릴리스로 새 버전 확인·내려받기(크기·SHA-256 확인)·조용한 설치 후 다시 실행
 
   doc/                      ── HWPX 문서 엔진 (UI·AI를 모름) ──
     xml.py                  네임스페이스, 태그, 글자·문단·칸 도우미, 줄 기호 판별
@@ -18,6 +19,7 @@ hanq/
     editor.py               Editor: 번호를 기준으로 채우기·끼워 넣기·지우기·옮기기·모양 바꾸기
     builder.py              DocumentBuilder: 기본 양식의 문단을 복제해 새 문서 조립
     render.py               간이 렌더러: 한글 없이 쪽 이미지를 그림 (실시간 미리보기용)
+    annotate.py             양식에서 AI가 채울 곳을 형광펜으로 칠한 사본 + 요약 (템플릿 탭)
 
   readers/                  ── 참고 자료 읽기 ──
     __init__.py             read_reference(path) → 텍스트 (표는 '| 칸 | 칸 |' 줄로)
@@ -26,6 +28,7 @@ hanq/
 
   ai/                       ── AI 호출 ──
     providers.py            Claude/GPT/Gemini/OpenRouter API, Claude Code/Codex CLI (스트리밍)
+    cli_setup.py            Claude Code/Codex 설치(공식 스크립트·npm)·로그인 창·로그인 상태 확인
     jsonstream.py           받는 중인 JSON에서 완성된 항목·쓰는 중인 글자를 꺼냄
     jsonutil.py             JSON 추출·흔한 실수 고치기
     prompts.py              시스템 프롬프트
@@ -39,7 +42,7 @@ hanq/
 
   hwp/                      ── 윈도우용 한글 COM ──
     worker.py               HwpWorker: 한글 하나를 전용 스레드에서 사용 (쪽 이미지, 쪽 위치, HWP→HWPX)
-    security.py             보안 승인 모듈 등록
+    security.py             보안 승인 모듈 등록 (함께 넣은 DLL, 또는 바탕화면·다운로드의 DLL/zip을 찾아 자동 등록)
 
   ui/                       ── tkinter 화면 ──
     theme.py                색·글꼴·버튼·카드
@@ -48,7 +51,9 @@ hanq/
     generate_tab.py         문서 생성 탭 (양식, 요청, 참고 자료, 생성/정지)
     chat.py                 AI 수정 대화
     forms_tab.py            양식(템플릿) 탭
-    settings_tab.py         설정 탭
+    settings_tab.py         설정 탭 (구독 연결 [한 번에 설정], 보안 모듈 자동 찾기, 업데이트)
+    update.py               새 버전 알림 창 (내려받기 진행률 → 설치 후 다시 시작)
+    connect.py              AI가 연결 안 됐을 때 '무엇을 가지고 있나요?' 창
     ime_font.py             한글 조합 글자 크기 맞추기 (윈도우)
 ```
 

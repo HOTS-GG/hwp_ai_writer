@@ -26,6 +26,83 @@ def find_dll() -> Path | None:
     return None
 
 
+SEARCH_DIRS = ("Desktop", "Downloads", "Documents", "바탕 화면", "다운로드", "문서")
+DLL_GLOB = "FilePathChecker*.dll"
+ZIP_HINTS = ("filepathchecker", "hwpautomation", "보안", "automation")
+
+
+def search_candidates(max_depth: int = 3) -> list[Path]:
+    """바탕화면·다운로드·문서에서 보안 모듈 DLL 또는 그것이 든 zip을 찾는다 (가까운 것·최근 것 먼저)."""
+    home = Path.home()
+    roots = [home / d for d in SEARCH_DIRS if (home / d).is_dir()]
+    found: list[Path] = []
+    for root in roots:
+        stack = [(root, 0)]
+        while stack:
+            d, depth = stack.pop()
+            try:
+                entries = list(d.iterdir())
+            except OSError:
+                continue
+            for e in entries:
+                name = e.name.lower()
+                if e.is_dir():
+                    if depth < max_depth and not name.startswith((".", "$")) and name != "node_modules":
+                        stack.append((e, depth + 1))
+                elif e.match(DLL_GLOB):
+                    found.append(e)
+                elif name.endswith(".zip") and any(h in name for h in ZIP_HINTS):
+                    found.append(e)
+    return sorted(found, key=lambda p: (p.suffix.lower() != ".dll", -_mtime(p)))
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _extract_from_zip(zip_path: Path) -> Path | None:
+    import zipfile
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            names = [n for n in z.namelist() if Path(n).name.lower().startswith("filepathchecker")
+                     and n.lower().endswith(".dll")]
+            if not names:
+                return None
+            SECURITY_DIR.mkdir(parents=True, exist_ok=True)
+            dst = SECURITY_DIR / Path(names[0]).name
+            dst.write_bytes(z.read(names[0]))
+            return dst
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
+def auto_install() -> Path | None:
+    """아직 등록 전이면 흔한 위치에서 찾아 자동으로 등록한다. 등록한 DLL 경로(이미 등록돼 있으면 None)."""
+    if winreg is None:
+        return None
+    reg = registered_path()
+    if reg and Path(reg).exists():
+        return None
+    bundled = find_dll()
+    if bundled:
+        _write_registry(bundled)
+        return bundled
+    for cand in search_candidates():
+        if cand.suffix.lower() == ".dll":
+            try:
+                return install(str(cand))
+            except OSError:
+                continue
+        dll = _extract_from_zip(cand)
+        if dll:
+            _write_registry(dll)
+            return dll
+    return None
+
+
 def registered_path() -> str | None:
     if winreg is None:
         return None

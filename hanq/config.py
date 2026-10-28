@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 
 if sys.platform == "darwin":
     APP_DIR = Path.home() / "Library" / "Application Support" / "HWP_AI_Writer"
@@ -74,6 +74,10 @@ DEFAULTS = {
     "ai_sees_screen": True,
     "max_screen_pages": 6,
     "window_geometry": "1480x880",
+    "auto_update_check": True,
+    "skip_version": "",
+    "last_update_check": "",
+    "auto_security_module": True,
 }
 
 

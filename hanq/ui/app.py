@@ -84,6 +84,30 @@ class App(tk.Tk):
             ime_font.install(self)
         self.reload_forms()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        from .update import Updater
+        self.updater = Updater(self)
+        self.updater.check_on_start()
+        if IS_WIN and self.s.get("auto_security_module", True):
+            self._auto_security()
+
+    def _auto_security(self):
+        """'접근 허용' 창을 없애는 보안 모듈이 아직 없으면 바탕화면·다운로드에서 찾아 자동 등록한다."""
+        from ..hwp import security
+
+        def run():
+            try:
+                dll = security.auto_install()
+            except OSError:
+                dll = None
+            if dll:
+                self.after(0, self._security_installed, dll)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _security_installed(self, dll):
+        self.restart_worker()
+        self.status(f"한글 보안 승인 모듈을 찾아 자동으로 등록했습니다 ({Path(dll).name})")
+        if hasattr(self, "settings_tab"):
+            self.settings_tab.refresh_security()
 
     # ── 화면 뼈대 ───────────────────────────────────────────────────────
     def _build(self):
@@ -166,12 +190,10 @@ class App(tk.Tk):
         if ai.api_key:
             return True
         name = ALL_PROVIDERS[ai.provider]
-        if ai.is_cli:
-            messagebox.showwarning("프로그램 없음", f"{name}를 찾을 수 없습니다.\n"
-                                                  "설정 탭의 안내대로 설치하거나 실행 파일 위치를 지정해 주세요.")
-        else:
-            messagebox.showwarning("API 키 필요", f"설정 탭에서 {name} API 키를 입력해주세요.")
-        self.nb.select(self.tab_cfg)
+        why = (f"{name}가 이 컴퓨터에 설치되어 있지 않습니다." if ai.is_cli
+               else f"{name} API 키가 입력되어 있지 않습니다.")
+        from .connect import ConnectDialog
+        ConnectDialog(self, why)
         return False
 
     # ── 작업 실행 ───────────────────────────────────────────────────────

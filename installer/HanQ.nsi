@@ -6,6 +6,7 @@
 
 Unicode true
 !include "MUI2.nsh"
+!include "Sections.nsh"
 
 !ifndef VERSION
   !define VERSION "1.0.0"
@@ -103,6 +104,15 @@ SectionEnd
 Section "바탕화면에 바로가기 만들기" SecDesktop
   CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${APPEXE}"
 SectionEnd
+
+; 한큐 안에서 자동 업데이트할 때는 조용히(/S) 설치한다. 이때 사용자가 지운 바탕화면 바로가기를
+; 되살리지 않도록, 이미 바로가기가 있던 경우에만 다시 만든다.
+Function .onInit
+  IfSilent 0 done
+  IfFileExists "$DESKTOP\${APPNAME}.lnk" done
+    !insertmacro UnselectSection ${SecDesktop}
+  done:
+FunctionEnd
 
 ; 제거해도 설정·API 키·내 양식(AppData\Roaming\HWP_AI_Writer)은 남겨 둔다 — 다시 설치하면 그대로 쓰도록
 Section "Uninstall"

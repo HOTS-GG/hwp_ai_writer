@@ -104,7 +104,11 @@ jobs:
           make_latest: true
           overwrite_files: true
           files: out/*
+          # '바뀐 점'은 한큐 안의 업데이트 알림 창에도 그대로 보인다 (커밋 메시지)
           body: |
+            ## 바뀐 점
+            ${{ github.event.head_commit.message }}
+
             ## 내려받기
             아래 **Assets**에서 내 컴퓨터에 맞는 파일 하나만 받으세요.
 
