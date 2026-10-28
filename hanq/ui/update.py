@@ -165,7 +165,7 @@ class UpdateDialog(tk.Toplevel):
             self.destroy()
             return
         # 설치 프로그램이 한큐 폴더를 덮어써야 하므로 닫는다 (설치가 끝나면 새 한큐가 다시 열린다)
-        self.app.after(300, self.app._on_close)
+        self.app.after(300, lambda: self.app._on_close(force=True))
 
     def _skip_version(self):
         self.app.set("skip_version", self.rel.version)

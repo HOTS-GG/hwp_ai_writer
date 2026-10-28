@@ -32,6 +32,7 @@ class ChatPanel:
         self._undo_btn = button(top, "되돌리기", self._undo)
         self._undo_btn.pack(side="left", padx=(6, 0))
         self._undo_btn.configure(state="disabled")
+        button(top, "최근 작업", lambda: self.gen.show_recent()).pack(side="left", padx=(6, 0))
 
         # 입력부를 먼저 아래에 고정해야 대화창이 늘어나도 가려지지 않는다
         row = tk.Frame(c, bg=CARD)
@@ -62,7 +63,7 @@ class ChatPanel:
         app.on_busy_change(self._on_busy)
 
     # ── 대화창 ──────────────────────────────────────────────────────────
-    def add(self, who: str, text: str):
+    def add(self, who: str, text: str, record: bool = True):
         log = self._log
         log.configure(state="normal")
         if who == "sys":
@@ -72,14 +73,35 @@ class ChatPanel:
             log.insert("end", text.strip() + "\n", who)
         log.configure(state="disabled")
         log.see("end")
+        if record and self.app.session is not None:
+            self.app.session.add_chat(who, text)
 
     def reset(self, msg: str):
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
         self._log.configure(state="disabled")
         self.history = []
+        if self.app.session is not None:
+            self.app.session.update(chat=[], history=[])
         self._update_undo()
         self.add("sys", msg)
+
+    def restore(self, chat: list, history: list, note: str = ""):
+        """작업 기록의 대화를 그대로 다시 보여 준다 (다시 기록하지 않음)."""
+        self._log.configure(state="normal")
+        self._log.delete("1.0", "end")
+        self._log.configure(state="disabled")
+        for who, text in chat:
+            self.add(who, text, record=False)
+        self.history = [tuple(h) for h in history]
+        self.add("sys", "── 지난 작업을 이어서 엽니다 ──", record=False)
+        if note:
+            self.add("sys", note)
+        self._update_undo()
+
+    def _save_history(self):
+        if self.app.session is not None:
+            self.app.session.set_history(self.history)
 
     def _on_enter(self, e):
         if e.state & 0x1:   # Shift+Enter는 줄바꿈
@@ -117,6 +139,14 @@ class ChatPanel:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         work = CACHE_DIR / f"edit_{datetime.datetime.now():%Y%m%d_%H%M%S}.hwpx"
         shutil.copyfile(path, work)
+        self.gen.hide_resume_banner()
+        # 불러온 문서도 작업 기록에 남겨, 고치다 꺼져도 이어서 할 수 있게 한다
+        session = self.app.sessions.new(Path(shown_name).stem, source=str(path))
+        try:
+            work = Path(session.add_version(str(work)))
+        except OSError:
+            pass
+        self.app.session = session
         self.app.workspace.start(str(work), Path(shown_name).stem)
         self.gen.set_doc_buttons(True)
         self.gen.preview.set_title(f"편집 중 — {shown_name}")
@@ -152,6 +182,7 @@ class ChatPanel:
         out = ws.next_path()
         history = list(self.history)
         self.history.append(("user", text))
+        self._save_history()
         sees = bool(app.s.get("ai_sees_screen", True))
 
         def work(job):
@@ -174,6 +205,7 @@ class ChatPanel:
             self.add("sys", "중단했습니다." if cancelled else f"오류: {msg[:300]}")
             if self.history and self.history[-1][0] == "user":
                 self.history.pop()
+            self._save_history()
             app.preview_file(self.gen.preview, src)   # 받는 중에 보이던 화면을 원래대로
 
         app.run_job(work, lambda r: self._on_edited(out, src, r), failed, pane=self.gen.preview)
@@ -187,9 +219,15 @@ class ChatPanel:
             self.add("sys", "⚠ " + res.warning)
             self.history.append(("ai", "(프로그램 알림) " + res.warning))
         if not res.changed:
+            self._save_history()
             app.status("변경 없음")
             app.preview_file(self.gen.preview, src)
             return
+        if app.session is not None:
+            try:   # 고친 버전도 작업 기록에 (되돌리기·이어서 하기)
+                out = app.session.add_version(out)
+            except OSError:
+                pass
         app.workspace.versions.append(out)
         self._apply_version(out)
         msg = f"{res.changed}곳 수정 · 버전 {len(app.workspace.versions)}"
@@ -197,6 +235,7 @@ class ChatPanel:
             before, after = res.pages
             msg += f" · 쪽 수 {before} → {after}"
             self.history.append(("ai", f"(프로그램 알림) 수정 결과 문서는 {before}쪽에서 {after}쪽이 되었음"))
+        self._save_history()
         self.add("sys", msg)
 
     def _apply_version(self, path: str):
@@ -215,5 +254,7 @@ class ChatPanel:
         if len(ws.versions) <= 1 or self.app.busy:
             return
         ws.versions.pop()
+        if self.app.session is not None:
+            self.app.session.pop_version()
         self._apply_version(ws.current)
         self.add("sys", f"되돌림 · 버전 {len(ws.versions)}")

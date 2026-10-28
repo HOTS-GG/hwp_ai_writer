@@ -31,8 +31,20 @@ class GenerateTab:
         self.refs: list[str] = []
         self.extra_forms: list[dict] = []
 
+        # 지난 작업 이어서 하기 띠 (켤 때 지난 작업이 있으면 보인다)
+        self._banner = tk.Frame(parent, bg="#fff6d6", highlightthickness=1, highlightbackground="#f0d78c")
+        self._banner_var = tk.StringVar(value="")
+        tk.Label(self._banner, text="🕘", bg="#fff6d6", font=FONT).pack(side="left", padx=(12, 4), pady=6)
+        tk.Label(self._banner, textvariable=self._banner_var, bg="#fff6d6", fg=TEXT, font=FONT).pack(side="left")
+        tk.Button(self._banner, text="✕", bg="#fff6d6", fg=MUTED, relief="flat", bd=0, cursor="hand2",
+                  command=self.hide_resume_banner).pack(side="right", padx=8)
+        button(self._banner, "최근 작업", self.show_recent).pack(side="right", padx=(6, 0), pady=4)
+        self._resume_btn = button(self._banner, "이어서 하기", lambda: None, "primary")
+        self._resume_btn.pack(side="right", pady=4)
+
         pw = tk.PanedWindow(parent, orient="horizontal", bg=BG, sashwidth=6, bd=0)
         pw.pack(fill="both", expand=True, padx=12, pady=12)
+        self._pw = pw
         left, mid, right = tk.Frame(pw, bg=BG), tk.Frame(pw, bg=BG), tk.Frame(pw, bg=BG)
         # 창을 키우면 미리보기만 넓어지고 양옆 패널은 그대로 둔다
         pw.add(left, minsize=320, width=360, stretch="never")
@@ -44,7 +56,7 @@ class GenerateTab:
         self.preview.pack(fill="both", expand=True)
         app.register_pane(self.preview)
         a = self.preview.actions
-        self._btn_save = button(a, "다른 이름으로 저장…", self._save_as)
+        self._btn_save = button(a, "다른 이름으로 저장…", self.save_as)
         self._btn_open = button(a, "한글로 열기", self._open_result, "primary")
         self._btn_folder = button(a, "폴더 열기", self._open_folder)
         for b in (self._btn_folder, self._btn_save, self._btn_open):
@@ -87,6 +99,8 @@ class GenerateTab:
             highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT, padx=8, pady=6)
         self._request.pack(fill="both", expand=True, padx=14, pady=(6, 12))
         self._request.insert("1.0", EXAMPLE_REQUEST)
+        self._inputs_job = None
+        self._request.bind("<KeyRelease>", lambda e: self._schedule_inputs_save())
 
         tk.Label(c3, text="공문, 지난 계획서, 안내문 등 (HWP·HWPX·PDF·DOCX·TXT)\n[보기]·두 번 누르기: 문서 모양 / [보낼 글]: AI에게 보내는 글",
                  bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
@@ -122,6 +136,7 @@ class GenerateTab:
         return next((f for f in self._all_forms() if form_label(f) == label), None)
 
     def _on_form_change(self):
+        self._schedule_inputs_save()
         f = self.selected_form()
         if f is None:
             self._form_info.set("양식 없이 요청 내용으로 문서를 구성합니다.\n"
@@ -161,14 +176,71 @@ class GenerateTab:
     # ── 참고 자료 ───────────────────────────────────────────────────────
     def _add_ref(self):
         for p in filedialog.askopenfilenames(title="참고 자료 선택", filetypes=REF_TYPES):
-            if p not in self.refs:
-                self.refs.append(p)
-                self._ref_list.insert("end", Path(p).name)
+            self._add_ref_path(p)
+        self._schedule_inputs_save()
+
+    def _add_ref_path(self, p: str):
+        if p not in self.refs:
+            self.refs.append(p)
+            self._ref_list.insert("end", Path(p).name)
 
     def _remove_ref(self):
         for i in reversed(self._ref_list.curselection()):
             self._ref_list.delete(i)
             del self.refs[i]
+        self._schedule_inputs_save()
+
+    # ── 입력 기억 (생성 전에 꺼져도 쓰던 요청이 남도록) ────────────────
+    def _inputs(self) -> dict:
+        req = self._request.get("1.0", "end").strip()
+        return {"form": self._form_var.get(), "request": "" if req == EXAMPLE_REQUEST else req, "refs": list(self.refs)}
+
+    def _schedule_inputs_save(self):
+        if getattr(self, "_inputs_job", None):
+            self.app.after_cancel(self._inputs_job)
+        self._inputs_job = self.app.after(1000, self.save_inputs)
+
+    def save_inputs(self):
+        self._inputs_job = None
+        self.app.sessions.save_inputs(self._inputs())
+
+    def restore_inputs(self, data: dict):
+        if not data:
+            return
+        if data.get("form") in self._form_combo["values"]:
+            self._form_var.set(data["form"])
+            self._on_form_change()
+        if data.get("request"):
+            self._request.delete("1.0", "end")
+            self._request.insert("1.0", data["request"])
+        for p in data.get("refs", []):
+            if Path(p).exists():
+                self._add_ref_path(p)
+
+    # ── 지난 작업 이어서 하기 ───────────────────────────────────────────
+    def show_resume_banner(self, s):
+        self._banner_var.set(f"지난 작업이 있습니다: {s.describe()}")
+        self._resume_btn.configure(command=lambda: (self.hide_resume_banner(), self.app.open_session(s)))
+        self._banner.pack(fill="x", padx=12, pady=(10, 0), before=self._pw)
+
+    def hide_resume_banner(self):
+        self._banner.pack_forget()
+
+    def show_recent(self):
+        from .recent import RecentDialog
+        RecentDialog(self.app)
+
+    def open_restored(self, s, note: str = ""):
+        """작업 기록을 화면에 되살린다 (문서·대화·입력)."""
+        self.hide_resume_banner()
+        ws = self.app.workspace
+        self.restore_inputs({k: s.data.get(k) for k in ("form", "request") if s.data.get(k)} |
+                            {"refs": [p for p in s.data.get("refs", []) if p not in self.refs]})
+        self.set_doc_buttons(True)
+        self.preview.set_title(f"이어서 — {s.title}")
+        self.chat.restore(s.data.get("chat", []), s.data.get("history", []), note)
+        self.app.status(f"지난 작업을 열었습니다: {s.title} (버전 {len(ws.versions)}개)")
+        self.app.preview_file(self.preview, ws.current)
 
     def _ref_window(self, path: str) -> PreviewPane:
         """참고 자료는 따로 뜨는 창에서 본다 (생성 결과 미리보기는 그대로 둔다). 창은 하나를 다시 쓴다."""
@@ -248,6 +320,10 @@ class GenerateTab:
         base = app.base_style_path()
         self.preview.set_title("생성 중…")
         self.preview.show_message("AI가 문서를 작성하고 있습니다…")
+        self.hide_resume_banner()
+        from ..session import GENERATING
+        session = app.sessions.new("작성 중인 문서" if form is None else f"{form['name']} (작성 중)",
+                                   status=GENERATING, **self._inputs())
 
         def work(job):
             from ..services import build_document, fill_form
@@ -258,20 +334,28 @@ class GenerateTab:
             return fill_form(job, form["path"], out, request, refs, info, ai)
 
         def failed(msg, cancelled):
+            from ..session import INTERRUPTED
             app.status("생성 중단" if cancelled else "생성 실패")
             self.preview.set_title("생성 결과")
             self.preview.token = None
+            kept = session.draft_path() is not None
+            if kept:   # 쓰던 데까지는 [최근 작업]에 남긴다
+                session.update(status=INTERRUPTED)
+            else:
+                app.sessions.delete(session.id)
             if not cancelled:
                 self.preview.show_message("생성에 실패했습니다.")
                 messagebox.showerror("생성 오류", msg[:800])
             elif self.preview.has_pages:
-                self.preview.set_note("중단됨 (저장되지 않음)")
+                self.preview.set_note("중단됨 — 쓰던 데까지는 [최근 작업]에 남아 있습니다" if kept
+                                      else "중단됨 (저장되지 않음)")
             else:
                 self.preview.show_message("중단했습니다.")
 
-        app.run_job(work, lambda r: self._on_generated(r, form), failed, pane=self.preview)
+        app.run_job(work, lambda r: self._on_generated(r, form, session), failed, pane=self.preview,
+                    draft_to=session)
 
-    def _on_generated(self, result, form):
+    def _on_generated(self, result, form, session=None):
         app = self.app
         title = result.title or (form["name"] if form else "문서")
         title = re.sub(r"^\s*[-\d.]*\s*", "", title) or "문서"
@@ -286,7 +370,15 @@ class GenerateTab:
                 app.status(f"자동 저장 실패: {e}")
         else:
             app.status("생성 완료 — [다른 이름으로 저장]으로 저장하세요")
-        app.workspace.start(result.path, title, saved)
+        path = result.path
+        if session is not None:
+            try:   # 문서를 작업 기록 폴더에 두어, 임시 폴더가 지워져도 이어서 고칠 수 있게
+                path = session.add_version(result.path)
+                session.update(title=title, saved_path=saved)
+            except OSError:
+                pass
+        app.session = session
+        app.workspace.start(path, title, saved)
         self.set_doc_buttons(True)
         self.preview.set_title(f"생성 결과 — {title}")
         intro = "문서가 완성되었습니다. 고칠 부분이 있으면 말씀해주세요."
@@ -297,7 +389,7 @@ class GenerateTab:
         self.chat.reset(intro)
         if app.s.get("open_after_save") and saved:
             open_path(saved)
-        app.preview_file(self.preview, saved or result.path)
+        app.preview_file(self.preview, saved or path)
 
     # ── 결과 파일 ───────────────────────────────────────────────────────
     def set_doc_buttons(self, on: bool):
@@ -321,19 +413,28 @@ class GenerateTab:
             i += 1
         return p
 
-    def _save_as(self):
+    def save_as(self) -> bool:
+        """다른 이름으로 저장. 저장했으면 True (닫기 확인 창에서도 쓴다)."""
         ws = self.app.workspace
         if not ws.current:
-            return
+            return False
         default = self.default_save_path(ws.title)
         path = filedialog.asksaveasfilename(initialdir=str(default.parent), initialfile=default.name,
                                             defaultextension=".hwpx", filetypes=[("HWPX 문서", "*.hwpx")])
-        if path:
+        if not path:
+            return False
+        try:
             shutil.copyfile(ws.current, path)
-            ws.saved_path = path
-            self.app.status(f"저장됨: {path}")
-            if self.app.s.get("open_after_save"):
-                open_path(path)
+        except OSError as e:
+            messagebox.showerror("저장 실패", f"{e}\n\n한글에서 그 파일을 열어 두었다면 닫고 다시 저장하세요.")
+            return False
+        ws.saved_path = path
+        if self.app.session is not None:
+            self.app.session.update(saved_path=path)
+        self.app.status(f"저장됨: {path}")
+        if self.app.s.get("open_after_save"):
+            open_path(path)
+        return True
 
     def _open_result(self):
         ws = self.app.workspace

@@ -64,6 +64,10 @@ class App(tk.Tk):
 
         self.forms: list[dict] = []
         self.workspace = Workspace()
+        # 작업 기록: 창을 닫거나 멈춰도 다음에 이어서 하도록 문서 버전·대화·입력을 계속 저장
+        from ..session import SessionStore
+        self.sessions = SessionStore()
+        self.session = None
         self.busy = False
         self.job: Job | None = None
         self._save_job = None
@@ -83,12 +87,45 @@ class App(tk.Tk):
             from . import ime_font
             ime_font.install(self)
         self.reload_forms()
+        self.gen.restore_inputs(self.sessions.load_inputs())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._offer_resume()
         from .update import Updater
         self.updater = Updater(self)
         self.updater.check_on_start()
         if IS_WIN and self.s.get("auto_security_module", True):
             self._auto_security()
+
+    # ── 작업 기록 (이어서 하기) ────────────────────────────────────────
+    def _offer_resume(self):
+        try:
+            self.sessions.cleanup(int(self.s.get("session_keep_days", 7)))
+            recent = self.sessions.list()
+        except OSError:
+            recent = []
+        if recent:
+            self.gen.show_resume_banner(recent[0])
+
+    def open_session(self, s):
+        """작업 기록을 다시 연다: 문서 버전(되돌리기 포함), 수정 대화, 저장 위치, 입력."""
+        if self.busy:
+            messagebox.showinfo("작업 중", "지금 하는 작업이 끝난 뒤에 열어 주세요.")
+            return
+        versions = s.version_paths()
+        note = ""
+        if not versions:
+            draft = s.draft_path()
+            if not draft:
+                messagebox.showwarning("열 수 없음", "이 작업에는 남아 있는 문서가 없습니다.")
+                return
+            versions = [s.add_version(draft)]
+            note = "AI가 쓰는 도중에 멈춘 문서입니다. 이어서 고치거나, 왼쪽에서 [문서 생성]으로 다시 만드세요."
+        self.session = s
+        ws = self.workspace
+        ws.start(versions[0], s.title, s.data.get("saved_path"))
+        ws.versions = list(versions)
+        self.gen.open_restored(s, note)
+        self.nb.select(self.tab_gen)
 
     def _auto_security(self):
         """'접근 허용' 창을 없애는 보안 모듈이 아직 없으면 바탕화면·다운로드에서 찾아 자동 등록한다."""
@@ -214,8 +251,9 @@ class App(tk.Tk):
         return False
 
     # ── 작업 실행 ───────────────────────────────────────────────────────
-    def run_job(self, work, on_done, on_error, pane=None) -> Job | None:
+    def run_job(self, work, on_done, on_error, pane=None, draft_to=None) -> Job | None:
         """work(job)를 작업 스레드에서 실행한다. pane이 있으면 실시간 화면을 그 미리보기에 보낸다.
+        draft_to(작업 기록)가 있으면 쓰는 도중의 문서를 몇 초마다 거기에 저장한다 (중간에 꺼져도 살리기).
         끝나면 on_done(결과), 실패하면 on_error(메시지, 중단 여부)를 화면 스레드에서 부른다."""
         if self.busy:
             return None
@@ -223,7 +261,8 @@ class App(tk.Tk):
         token = ("job", next(_tokens))
         live = pane is not None and self.s.get("live_preview", True)
         job = Job(on_status=lambda m: self.after(0, self.status, m),
-                  on_frame=(lambda data: self.live.submit(data, token)) if live else None)
+                  on_frame=(lambda data: self.live.submit(data, token)) if live else None,
+                  on_draft=(lambda data: draft_to.set_draft(data, force=True)) if draft_to is not None else None)
         if pane is not None:
             pane.token = token
         self.job = job
@@ -442,9 +481,34 @@ class App(tk.Tk):
         shutil.rmtree(CACHE_DIR, ignore_errors=True)
         self.status("미리보기 캐시를 비웠습니다.")
 
-    def _on_close(self):
+    def _confirm_close(self) -> bool:
+        """작업 중이거나 저장하지 않은 문서가 있으면 닫기 전에 묻는다."""
+        from .dialogs import ask_choice
+        later = "닫아도 지금까지의 작업은 다음에 켤 때 [이어서 하기]나 [최근 작업]에서 다시 열 수 있습니다."
+        if self.busy:
+            return ask_choice(self, "닫기", "AI가 지금 작업 중입니다. 닫을까요?",
+                              [("close", "그래도 닫기", "danger"), ("cancel", "계속 작업하기", "primary")],
+                              "닫으면 작업이 멈춥니다. " + later) == "close"
+        ws = self.workspace
+        if ws.current and not ws.saved_path:
+            r = ask_choice(self, "닫기", "저장하지 않은 문서가 있습니다.",
+                           [("save", "저장하고 닫기", "primary"), ("close", "저장하지 않고 닫기", "normal"),
+                            ("cancel", "취소", "normal")], later)
+            if r == "save":
+                return self.gen.save_as()
+            return r == "close"
+        return True
+
+    def _on_close(self, force: bool = False):
+        if not force and not self._confirm_close():
+            return
         if self.job is not None:
             self.job.stop.set()
+        self._progress.stop()   # 진행 막대 애니메이션이 창을 닫은 뒤에 돌지 않게
+        try:
+            self.gen.save_inputs()
+        except Exception:
+            pass
         zoomed = self.state() == "zoomed"
         self.s["window_zoomed"] = zoomed
         if not zoomed:   # 최대화 상태의 크기는 저장하지 않는다 (풀었을 때 화면 가득 차지 않게)

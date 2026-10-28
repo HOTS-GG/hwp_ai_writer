@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 if sys.platform == "darwin":
     APP_DIR = Path.home() / "Library" / "Application Support" / "HWP_AI_Writer"
@@ -79,6 +79,7 @@ DEFAULTS = {
     "skip_version": "",
     "last_update_check": "",
     "auto_security_module": True,
+    "session_keep_days": 7,
 }
 
 

@@ -11,6 +11,7 @@ hanq/
   config.py                 버전, 설정 파일(settings.json) 읽기/쓰기, 경로
   system.py                 윈도우/맥 차이 (글꼴, 파일 열기, 휠, CLI 환경변수)
   updater.py                GitHub 릴리스로 새 버전 확인·내려받기(크기·SHA-256 확인)·조용한 설치 후 다시 실행
+  session.py                작업 기록: 문서 버전·수정 대화·입력·쓰는 도중의 문서를 AppData\sessions에 계속 저장 (이어서 하기)
 
   doc/                      ── HWPX 문서 엔진 (UI·AI를 모름) ──
     xml.py                  네임스페이스, 태그, 글자·문단·칸 도우미, 줄 기호 판별
@@ -55,6 +56,8 @@ hanq/
     settings_tab.py         설정 탭 (구독 연결 [한 번에 설정], 보안 모듈 자동 찾기, 업데이트)
     update.py               새 버전 알림 창 (내려받기 진행률 → 설치 후 다시 시작)
     connect.py              AI가 연결 안 됐을 때 '무엇을 가지고 있나요?' 창
+    recent.py               최근 작업 창 (작업 기록 열기·지우기)
+    dialogs.py              버튼 이름을 정할 수 있는 확인 창 (닫기 확인 등)
     ime_font.py             한글 조합 글자 크기 맞추기 (윈도우)
 ```
 
