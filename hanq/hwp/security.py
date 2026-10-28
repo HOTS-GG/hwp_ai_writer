@@ -13,6 +13,11 @@ from pathlib import Path
 
 from ..config import APP_DIR, resource_dir
 
+# 한컴 공식 안내 페이지와, 그 페이지의 '보안모듈(Automation).zip' 내려받기 주소 (한컴 공식 GitHub 저장소)
+OFFICIAL_PAGE = "https://developer.hancom.com/hwpautomation"
+OFFICIAL_ZIP = ("https://github.com/hancom-io/devcenter-archive/raw/main/hwp-automation/"
+                "%EB%B3%B4%EC%95%88%EB%AA%A8%EB%93%88(Automation).zip")
+
 MODULE_NAME = "FilePathCheckerModule"
 REG_PATH = r"Software\HNC\HwpAutomation\Modules"
 SECURITY_DIR = APP_DIR / "security"
@@ -101,6 +106,26 @@ def auto_install() -> Path | None:
             _write_registry(dll)
             return dll
     return None
+
+
+def download_and_install(timeout: int = 30) -> Path:
+    """한컴 공식 주소에서 보안 모듈 zip을 받아 DLL을 꺼내 등록한다. 실패하면 OSError."""
+    import urllib.request
+    from ..config import CACHE_DIR
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = CACHE_DIR / "hwp_security_module.zip"
+    req = urllib.request.Request(OFFICIAL_ZIP, headers={"User-Agent": "HanQ"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            dest.write_bytes(r.read())
+    except Exception as e:
+        raise OSError(f"한컴 사이트에서 보안 모듈을 받지 못했습니다 (인터넷 연결 확인): {e}")
+    dll = _extract_from_zip(dest)
+    dest.unlink(missing_ok=True)
+    if dll is None:
+        raise OSError("받은 파일 안에서 보안 모듈 DLL을 찾지 못했습니다. [받는 곳 열기]로 직접 받아 주세요.")
+    _write_registry(dll)
+    return dll
 
 
 def registered_path() -> str | None:

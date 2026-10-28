@@ -195,9 +195,10 @@ class SettingsTab:
     # ── 한글 보안 모듈 ──
     def _build_security(self, inner):
         c = self._card(inner, "한글 '접근 허용' 경고 없애기")
-        tk.Label(c, text="한컴의 '보안 승인 모듈'이 등록되어 있으면 미리보기·저장 때 '접근 허용' 창이 뜨지 않습니다.\n"
-                         "한큐는 켤 때마다 바탕화면·다운로드·문서 폴더에서 모듈(DLL 또는 받은 zip)을 찾아 자동으로 등록합니다.\n"
-                         "아직 없다면: 한컴 디벨로퍼 사이트 → 한글 오토메이션 → 보안 승인 모듈을 받아 다운로드 폴더에 두고 [자동으로 찾기].",
+        from ..hwp.security import OFFICIAL_PAGE
+        tk.Label(c, text="한컴의 '보안 승인 모듈'을 등록하면 미리보기·저장 때 '접근 허용' 창이 뜨지 않습니다.\n"
+                         "[한컴에서 받아 자동 등록]을 누르면 한컴 공식 사이트에서 받아 바로 등록합니다.\n"
+                         f"직접 받으려면: {OFFICIAL_PAGE}  → '보안모듈(Automation).zip'",
                  bg=CARD, fg=MUTED, font=FONT_SM, justify="left").pack(anchor="w", padx=14)
         row = tk.Frame(c, bg=CARD)
         row.pack(fill="x", padx=14, pady=(8, 4))
@@ -205,8 +206,8 @@ class SettingsTab:
         self._sec_lbl = tk.Label(row, textvariable=self._sec_var, bg=CARD, font=FONT)
         self._sec_lbl.pack(side="left")
         button(row, "DLL 직접 선택…", self._install_dll).pack(side="right")
-        button(row, "자동으로 찾기", self._auto_find_dll, "primary").pack(side="right", padx=(0, 6))
-        button(row, "받는 곳 열기", lambda: webbrowser.open("https://developer.hancom.com/")).pack(side="right", padx=(0, 6))
+        button(row, "받는 곳 열기", lambda: webbrowser.open(OFFICIAL_PAGE)).pack(side="right", padx=(0, 6))
+        button(row, "한컴에서 받아 자동 등록", self._download_dll, "primary").pack(side="right", padx=(0, 6))
         self._check(c, "켤 때 자동으로 찾아 등록하기", "auto_security_module", last=True)
         self.refresh_security()
 
@@ -216,35 +217,34 @@ class SettingsTab:
         self._sec_var.set(("✓ " if ok else "✗ ") + msg)
         self._sec_lbl.configure(fg=OK if ok else DANGER)
 
-    def _auto_find_dll(self):
+    def _download_dll(self):
         from ..hwp import security
-        self._sec_var.set("찾는 중…")
+        if security.status()[0] and not messagebox.askyesno(
+                "이미 등록됨", "보안 승인 모듈이 이미 등록되어 있습니다.\n한컴에서 다시 받아 등록할까요?"):
+            return
+        self._sec_var.set("한컴 사이트에서 받는 중…")
 
         def run():
             try:
-                dll = security.auto_install()
+                dll = security.download_and_install()
                 err = None
             except OSError as e:
                 dll, err = None, str(e)
-            self.app.after(0, self._auto_found, dll, err)
+            self.app.after(0, self._downloaded, dll, err)
         threading.Thread(target=run, daemon=True).start()
 
-    def _auto_found(self, dll, err):
-        from ..hwp import security
+    def _downloaded(self, dll, err):
+        from ..hwp.security import OFFICIAL_PAGE
         self.refresh_security()
         if dll:
             self.app.restart_worker()
-            messagebox.showinfo("등록 완료", f"보안 승인 모듈을 찾아 등록했습니다.\n{dll}\n\n"
+            messagebox.showinfo("등록 완료", "한컴 보안 승인 모듈을 받아 등록했습니다.\n\n"
                                          "다음 미리보기부터 '접근 허용' 창이 뜨지 않습니다.")
-        elif security.status()[0]:
-            messagebox.showinfo("이미 등록됨", "보안 승인 모듈이 이미 등록되어 있습니다.")
         else:
-            messagebox.showinfo("찾지 못했습니다",
-                                (err + "\n\n" if err else "") +
-                                "바탕화면·다운로드·문서 폴더에서 보안 승인 모듈을 찾지 못했습니다.\n\n"
-                                "1. [받는 곳 열기] → 한글 오토메이션 → 보안 승인 모듈을 내려받기\n"
-                                "2. 받은 zip 파일을 그대로 다운로드 폴더에 두기\n"
-                                "3. 다시 [자동으로 찾기]")
+            messagebox.showwarning("받지 못했습니다",
+                                   f"{err}\n\n직접 받기:\n1. [받는 곳 열기] ({OFFICIAL_PAGE})\n"
+                                   "2. '보안모듈(Automation).zip'을 내려받아 다운로드 폴더에 두기\n"
+                                   "3. 한큐를 다시 켜면 자동으로 찾아 등록합니다")
 
     def _install_dll(self):
         from ..hwp import security

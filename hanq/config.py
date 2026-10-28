@@ -74,6 +74,7 @@ DEFAULTS = {
     "ai_sees_screen": True,
     "max_screen_pages": 6,
     "window_geometry": "1480x880",
+    "window_zoomed": False,
     "auto_update_check": True,
     "skip_version": "",
     "last_update_check": "",

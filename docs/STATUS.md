@@ -8,7 +8,7 @@
 | 항목 | 상태 |
 |---|---|
 | 배포된 최신 | v1.1.1 (2026-10-22) — 윈도우 설치 exe(NSIS), 맥 dmg(arm64·x86_64) |
-| 이 브랜치 | `feature/auto-setup` → **1.2.0** (main에 합치면 GitHub Actions가 릴리스 자동 생성) |
+| 1.2.0 | `feature/auto-setup`을 main에 합침 (2026-10-28) → GitHub Actions가 릴리스 자동 생성 |
 | 저장소 | https://github.com/HOTS-GG/hwp_ai_writer (공개) |
 | 테스트 | `python -m unittest discover -s tests -t .` — 54개 통과 (4개는 HWP 예제 폴더가 있어야 실행) |
 | 코드 검사 | `python -m pyflakes hanq tests` 깨끗 |
@@ -29,14 +29,15 @@
    - [명령어 복사], [고급 ▾](실행 파일 경로·모델·다른 계정으로 로그인).
    - Claude/Codex 데스크톱 앱에 들어 있는 실행 파일도 자동으로 찾는다 (`providers.find_cli`).
 3. **'접근 허용' 보안 모듈 자동 탑재** (`hanq/hwp/security.py`)
-   - 켤 때(윈도우) 등록 전이면: 함께 넣은 DLL(`assets/security/*.dll`, 빌드 때 포함) → 바탕화면·다운로드·문서에서
-     `FilePathChecker*.dll` 또는 한컴에서 받은 zip을 찾아 꺼내 자동 등록. 설정 탭에 [자동으로 찾기]·[받는 곳 열기].
-   - **결정 필요:** 한컴 예제 DLL(`FilePathCheckerModuleExample.dll`)을 공개 저장소의 `assets/security/`에 넣어
-     설치 파일에 포함할지. 패키지에 재배포 조건 문서가 없어 아직 넣지 않았다.
-4. **AI 연결 안내 창** (`hanq/ui/connect.py`): 키도 구독도 없을 때 경고 대신
+   - DLL은 설치 파일에 **넣지 않는다** (사용자 결정, 2026-10-28). 대신:
+   - 설정 탭 [한컴에서 받아 자동 등록]: 한컴 공식 주소(`OFFICIAL_ZIP`, hancom-io/devcenter-archive의
+     `보안모듈(Automation).zip`)에서 받아 DLL을 꺼내 등록. [받는 곳 열기] = https://developer.hancom.com/hwpautomation
+   - 켤 때(윈도우) 등록 전이면 바탕화면·다운로드·문서에서 `FilePathChecker*.dll` 또는 받은 zip을 찾아 자동 등록.
+4. **창 위치**: 켤 때 항상 화면 정중앙 (저장된 크기가 화면보다 크면 맞춰 줄임), 최대화로 닫았으면 최대화로 연다.
+5. **AI 연결 안내 창** (`hanq/ui/connect.py`): 키도 구독도 없을 때 경고 대신
    [Claude 구독이 있어요] / [ChatGPT 구독이 있어요] / [API 키가 있어요] → 바로 설정 진행.
    API 키를 붙여 넣으면(지금 방식이 쓸 수 없는 상태일 때) 그 제공자를 자동 선택.
-5. **템플릿: AI가 채울 곳 보기** (`hanq/doc/annotate.py`, 템플릿 탭)
+6. **템플릿: AI가 채울 곳 보기** (`hanq/doc/annotate.py`, 템플릿 탭)
    - 양식 사본에 형광펜: 노랑=채울 빈칸, 파랑=고칠 수 있는 예시문, 초록=행 수까지 맞추는 표, 색 없음=그대로.
    - 왼쪽에 요약("빈칸 31곳 · 예시문 3줄 · 표 2개")과 범례. 양식을 추가하면 바로 분석하고, 채울 곳이 없으면 안내.
    - 이 과정에서 발견한 문제를 고침: 표지(첫 장 제목 앞)의 교훈·슬로건·주소가 '예시문'으로 잡혀 AI가 바꿀 수 있었음

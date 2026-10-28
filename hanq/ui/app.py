@@ -58,8 +58,8 @@ class App(tk.Tk):
                 self.iconbitmap(default=str(icon))
             except tk.TclError:
                 pass
-        self.geometry(self.s.get("window_geometry", "1280x820"))
         self.minsize(1000, 720)
+        self._place_window()
         self.configure(bg=BG)
 
         self.forms: list[dict] = []
@@ -108,6 +108,23 @@ class App(tk.Tk):
         self.status(f"한글 보안 승인 모듈을 찾아 자동으로 등록했습니다 ({Path(dll).name})")
         if hasattr(self, "settings_tab"):
             self.settings_tab.refresh_security()
+
+    def _place_window(self):
+        """저장된 크기로, 항상 화면 정중앙에 띄운다 (위치를 정하지 않으면 윈도우가 아무 데나 놓는다).
+        화면보다 크면 화면에 맞춰 줄이고, 지난번에 최대화로 닫았으면 최대화로 연다."""
+        import re
+        m = re.match(r"(\d+)x(\d+)", str(self.s.get("window_geometry", "")))
+        w, h = (int(m.group(1)), int(m.group(2))) if m else (1480, 880)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        usable_h = sh - 48   # 작업 표시줄
+        w, h = max(1000, min(w, sw - 40)), max(720, min(h, usable_h - 40))
+        x, y = max(0, (sw - w) // 2), max(0, (usable_h - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        if self.s.get("window_zoomed"):
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
 
     # ── 화면 뼈대 ───────────────────────────────────────────────────────
     def _build(self):
@@ -428,7 +445,10 @@ class App(tk.Tk):
     def _on_close(self):
         if self.job is not None:
             self.job.stop.set()
-        self.s["window_geometry"] = self.geometry()
+        zoomed = self.state() == "zoomed"
+        self.s["window_zoomed"] = zoomed
+        if not zoomed:   # 최대화 상태의 크기는 저장하지 않는다 (풀었을 때 화면 가득 차지 않게)
+            self.s["window_geometry"] = self.geometry().split("+")[0]
         self.flush_settings()
         self.worker.shutdown()
         self.live.close()
