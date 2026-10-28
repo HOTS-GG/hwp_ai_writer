@@ -93,11 +93,13 @@ def check(timeout: int = 10) -> Release | None:
 
 
 def _clean_notes(body: str) -> str:
-    """릴리스 본문에서 '바뀐 점'만 남긴다 (내려받기 표·맥 안내·공동 작성자 줄은 앱 안에서 필요 없음)."""
+    """릴리스 본문의 '바뀐 점'에서 첫 줄(커밋 제목)만 남긴다 — 알림 창에는 한 줄 요약이면 충분하다."""
     text = re.split(r"^##\s*내려받기", body.replace("\r\n", "\n"), flags=re.M)[0]
-    lines = [ln for ln in text.splitlines()
-             if not re.match(r"^\s*(##\s*바뀐 점\s*$|Co-Authored-By:)", ln, re.I)]
-    return "\n".join(lines).strip()[:1500]
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln and not re.match(r"^(##\s*바뀐 점$|Co-Authored-By:)", ln, re.I):
+            return ln[:200]
+    return ""
 
 
 def download(rel: Release, on_progress=None, stop=None) -> Path:

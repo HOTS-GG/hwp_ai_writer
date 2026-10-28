@@ -120,7 +120,7 @@ class ChatPanel:
         self.app.workspace.start(str(work), Path(shown_name).stem)
         self.gen.set_doc_buttons(True)
         self.gen.preview.set_title(f"편집 중 — {shown_name}")
-        self.reset(f"'{shown_name}'을(를) 불러왔습니다.\n"
+        self.reset(f"불러온 문서: {shown_name}\n"
                    "원본은 그대로 두고, 고친 결과는 [다른 이름으로 저장]으로 저장하세요.")
         self.app.preview_file(self.gen.preview, str(work))
 

@@ -10,6 +10,7 @@
 | 배포된 최신 | v1.1.1 (2026-10-22) — 윈도우 설치 exe(NSIS), 맥 dmg(arm64·x86_64) |
 | 1.2.0 | `feature/auto-setup`을 main에 합침 (2026-10-28) → GitHub Actions가 릴리스 자동 생성 |
 | 1.2.1 | 완성 문서 → 빈칸 양식, 지원하지 않는 양식 파일 안내 (2026-10-28) |
+| 1.2.2 | 설정 탭을 왼쪽 대분류 메뉴 + 넓은 소분류 칸으로, 업데이트 알림은 패치 노트 한 줄만, 어색한 문구 정리 |
 | 저장소 | https://github.com/HOTS-GG/hwp_ai_writer (공개) |
 | 테스트 | `python -m unittest discover -s tests -t .` — 55개 통과 (4개는 HWP 예제 폴더가 있어야 실행) |
 | 코드 검사 | `python -m pyflakes hanq tests` 깨끗 |

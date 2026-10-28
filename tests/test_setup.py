@@ -19,9 +19,9 @@ class VersionTest(unittest.TestCase):
         self.assertFalse(updater.is_newer("1.0.9", "1.1.0"))
 
     def test_notes_keep_only_changes(self):
-        body = ("## 바뀐 점\n자동 업데이트 추가\n\nCo-Authored-By: X <x@y>\n\n"
-                "## 내려받기\n| 윈도우 | a.exe |\n")
-        self.assertEqual(updater._clean_notes(body), "자동 업데이트 추가")
+        body = ("## 바뀐 점\n1.2.1: 자동 업데이트 추가\n\n자세한 설명은 알림 창에 필요 없음\n- 항목\n\n"
+                "Co-Authored-By: X <x@y>\n\n## 내려받기\n| 윈도우 | a.exe |\n")
+        self.assertEqual(updater._clean_notes(body), "1.2.1: 자동 업데이트 추가")
 
 
 class ReleaseTest(unittest.TestCase):

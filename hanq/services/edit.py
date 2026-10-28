@@ -49,7 +49,7 @@ def edit_document(job: Job, path: str, out_path: str, instruction: str, history:
     changed = report.changed
     warning = ""
     if report.missed:
-        warning = ("AI가 요청한 것 중 " + ", ".join(report.missed) + "을(를) 문서에 반영하지 못했습니다. "
+        warning = ("AI가 요청한 것 중 문서에 반영하지 못한 것이 있습니다: " + ", ".join(report.missed) + ". "
                    "위치를 더 구체적으로 말씀해 주세요.")
     # AI가 같은 글자를 그대로 돌려준 경우: 고쳤다고 답해도 실제로는 바뀐 게 없다
     if changed and doc.snapshot() == before:

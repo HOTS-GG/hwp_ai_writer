@@ -21,80 +21,144 @@ CLI_INSTALL_NOTE = {
 }
 
 
+CATEGORIES = (
+    ("ai", "AI 연결", "API 키 · 구독 계정"),
+    ("doc", "문서 작성", "기본 정보 · 저장 · 양식"),
+    ("view", "미리보기 · 한글", "미리보기 · '접근 허용' 창"),
+    ("adv", "고급 · 업데이트", "AI 세부 옵션 · 업데이트"),
+)
+
+
 class SettingsTab:
+    """왼쪽 대분류 메뉴 + 오른쪽 소분류 칸(화면 너비 가득). 바꾸면 바로 저장된다."""
+
     def __init__(self, app, parent):
         self.app = app
         self.s = app.s
         outer = tk.Frame(parent, bg=BG)
         outer.pack(fill="both", expand=True)
-        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        inner = tk.Frame(canvas, bg=BG)
-        self._canvas, self._inner = canvas, inner
-        win = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=min(e.width, 900)))
-        canvas.bind("<Enter>", lambda e: canvas.bind_all(
-            "<MouseWheel>", lambda ev: canvas.yview_scroll(wheel_units(ev), "units")))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
-        self._build_providers(inner)
-        self._build_cli(inner)
+        # ── 왼쪽 대분류 메뉴 ──
+        nav = tk.Frame(outer, bg=CARD, width=230, highlightthickness=1, highlightbackground=BORDER)
+        nav.pack(side="left", fill="y", padx=(12, 0), pady=12)
+        nav.pack_propagate(False)
+        tk.Label(nav, text="설정", bg=CARD, fg=TEXT, font=font(13, "bold")).pack(anchor="w", padx=18, pady=(16, 10))
+        self._nav_items = {}
+        for key, title, sub in CATEGORIES:
+            self._nav_items[key] = self._nav_item(nav, key, title, sub)
+        foot = tk.Frame(nav, bg=CARD)
+        foot.pack(side="bottom", fill="x", padx=18, pady=14)
+        self._saved_lbl = tk.StringVar(value="바꾸면 바로 저장됩니다.")
+        tk.Label(foot, textvariable=self._saved_lbl, bg=CARD, fg=MUTED, font=FONT_SM).pack(anchor="w")
+        tk.Label(foot, text=f"한큐 HanQ  v{cfg.APP_VERSION}", bg=CARD, fg=MUTED, font=FONT_SM).pack(anchor="w", pady=(2, 0))
 
-        c = self._card(inner, "기본 정보 (문서에 자동 반영)")
+        # ── 오른쪽 소분류 칸 (대분류마다 한 쪽) ──
+        self._content = tk.Frame(outer, bg=BG)
+        self._content.pack(side="left", fill="both", expand=True)
+        self._pages = {key: self._make_page(title, sub) for key, title, sub in CATEGORIES}
+
+        p = self._pages["ai"][1]
+        self._build_providers(p)
+        self._build_cli(p)
+
+        p = self._pages["doc"][1]
+        c = self._card(p, "기본 정보 — 문서에 자동으로 들어갑니다")
         self._entry(c, "학교(기관)명", "school_name")
         self._entry(c, "작성 부서", "department", "예) 과학정보부")
         self._entry(c, "작성자", "author", "예) 교사 홍길동", last=True)
-
-        c = self._card(inner, "저장")
+        c = self._card(p, "저장")
         self._entry(c, "저장 폴더", "output_dir", browse="dir")
         self._entry(c, "파일 이름 규칙", "filename_pattern", "{title}=제목, {date}=날짜, {time}=시각")
         self._check(c, "생성하면 저장 폴더에 자동 저장", "auto_save")
         self._check(c, "저장 후 한글로 바로 열기", "open_after_save", last=True)
-
-        c = self._card(inner, "양식")
+        c = self._card(p, "양식")
         self._entry(c, "내 양식 폴더", "user_forms_dir", browse="dir", on_change=app.reload_forms)
         row = self._row(c, "기본 서식", "PDF 양식·자유 작성 문서에 쓰는 서식")
-        styles = [p.name for p in sorted(BUILTIN_FORMS_DIR.glob("*.hwpx"))]
+        styles = [x.name for x in sorted(BUILTIN_FORMS_DIR.glob("*.hwpx"))]
         v = tk.StringVar(value=self.s.get("base_style_form"))
         v.trace_add("write", lambda *a: (app.set("base_style_form", v.get()), app.gen.refresh_forms()))
         ttk.Combobox(row, textvariable=v, values=styles, state="readonly", font=FONT).pack(fill="x")
         tk.Frame(c, bg=CARD, height=8).pack()
 
-        c = self._card(inner, "미리보기")
+        p = self._pages["view"][1]
+        c = self._card(p, "미리보기")
         if app.rhwp is not None:
             engine = f"✓ rhwp 사용 중 — 한글 없이 실제 모양으로 그립니다 ({app.rhwp.exe})"
         else:
             engine = "rhwp 없음 — 간이 미리보기를 쓰고, 한글이 있으면 한글로 다시 그립니다"
         tk.Label(c, text=engine, bg=CARD, fg=OK if app.rhwp else MUTED, font=FONT_SM, justify="left",
-                 wraplength=760).pack(anchor="w", padx=14, pady=(0, 4))
+                 wraplength=1100).pack(anchor="w", padx=14, pady=(0, 4))
         self._entry(c, "rhwp 실행 파일", "rhwp_path", "비워 두면 자동으로 찾음 (바꾸면 다시 시작해야 적용)")
         self._check(c, "AI가 쓰는 대로 실시간으로 보기", "live_preview")
         self._check(c, "rhwp가 없을 때: 다 쓴 뒤 한글로 정확한 쪽 이미지 다시 그리기 (윈도우 한글 필요)", "auto_preview")
         self._spin(c, "해상도 (DPI)", "preview_dpi", 72, 200, 12)
-        self._spin(c, "기본 확대율 (%)", "preview_zoom", 30, 250, 10, last=True)
-
+        self._spin(c, "기본 확대율 (%)", "preview_zoom", 30, 250, 10)
+        row = self._row(c, "미리보기 캐시", "미리보기가 이상할 때 비우면 새로 그립니다")
+        button(row, "캐시 비우기", app.clear_cache).pack(anchor="w")
+        tk.Frame(c, bg=CARD, height=8).pack()
         if IS_WIN:
-            self._build_security(inner)
-        self._build_update(inner)
+            self._build_security(p)
 
-        c = self._card(inner, "AI 고급 옵션")
+        p = self._pages["adv"][1]
+        c = self._card(p, "AI 세부 옵션 — 잘 모르면 그대로 두세요")
         self._spin(c, "최대 출력 토큰", "max_tokens", 2000, 128000, 1000)
         self._spin(c, "창의성 (temperature)", "temperature", 0.0, 1.0, 0.1, is_float=True)
         self._spin(c, "참고 자료 최대 글자 수", "ref_max_chars", 2000, 200000, 2000)
         self._spin(c, "응답 대기 시간 (초)", "request_timeout", 60, 1800, 30)
         self._check(c, "수정 요청 때 AI에게 한글 화면(쪽 이미지)과 쪽 나눔 보여주기", "ai_sees_screen")
         self._spin(c, "AI에게 보여줄 최대 쪽 수", "max_screen_pages", 1, 20, 1, last=True)
+        self._build_update(p)
 
-        bottom = tk.Frame(inner, bg=BG)
-        bottom.pack(fill="x", padx=24, pady=18)
-        self._saved_lbl = tk.StringVar(value="변경 사항은 자동으로 저장됩니다.")
-        tk.Label(bottom, textvariable=self._saved_lbl, bg=BG, fg=MUTED, font=FONT_SM).pack(side="left")
-        button(bottom, "미리보기 캐시 비우기", app.clear_cache).pack(side="right")
-        tk.Label(bottom, text=f"한큐 HanQ  v{cfg.APP_VERSION}", bg=BG, fg=MUTED, font=FONT_SM).pack(side="right", padx=12)
+        self.show("ai")
+
+    # ── 대분류 메뉴·쪽 ──
+    def _nav_item(self, nav, key, title, sub):
+        item = tk.Frame(nav, bg=CARD, cursor="hand2")
+        item.pack(fill="x", pady=1)
+        bar = tk.Frame(item, bg=CARD, width=4)
+        bar.pack(side="left", fill="y")
+        box = tk.Frame(item, bg=CARD)
+        box.pack(side="left", fill="x", expand=True, padx=(12, 8), pady=8)
+        t = tk.Label(box, text=title, bg=CARD, fg=TEXT, font=font(11, "bold"), anchor="w")
+        t.pack(fill="x")
+        s = tk.Label(box, text=sub, bg=CARD, fg=MUTED, font=FONT_SM, anchor="w")
+        s.pack(fill="x")
+        for w in (item, box, t, s, bar):
+            w.bind("<Button-1>", lambda e, k=key: self.show(k))
+        return item, bar, box, t, s
+
+    def _make_page(self, title, sub):
+        page = tk.Frame(self._content, bg=BG)
+        canvas = tk.Canvas(page, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=BG)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(wheel_units(ev), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        head = tk.Frame(inner, bg=BG)
+        head.pack(fill="x", padx=24, pady=(18, 0))
+        tk.Label(head, text=title, bg=BG, fg=TEXT, font=font(15, "bold")).pack(side="left")
+        tk.Label(head, text=sub, bg=BG, fg=MUTED, font=FONT).pack(side="left", padx=12, pady=(4, 0))
+        return page, inner, canvas
+
+    def show(self, key):
+        for k, (page, _, _) in self._pages.items():
+            page.pack_forget()
+        self._pages[key][0].pack(fill="both", expand=True)
+        for k, (item, bar, box, t, s) in self._nav_items.items():
+            on = k == key
+            bg = SOFT if on else CARD
+            for w in (item, box, t, s):
+                w.configure(bg=bg)
+            bar.configure(bg=ACCENT if on else CARD)
+            t.configure(fg=ACCENT if on else TEXT)
+        self._current = key
 
     def saved(self, when):
         self._saved_lbl.set(f"저장됨 ({when:%H:%M:%S})")
@@ -143,20 +207,22 @@ class SettingsTab:
     def focus_api_key(self):
         cur = self._provider_var.get()
         ent = self._api_entries.get(cur) or self._api_entries["claude"]
-        self.scroll_to(ent)
+        self.scroll_to(ent, "ai")
         ent.focus_set()
         self.app.status("API 키를 붙여 넣으세요 (Ctrl+V). 넣으면 바로 저장되고 그 제공자가 선택됩니다.")
 
     def start_cli_setup(self, pid):
         box = self._cli[pid]
-        self.scroll_to(box.go)
+        self.scroll_to(box.go, "ai")
         box.setup()
 
-    def scroll_to(self, widget):
-        self._canvas.update_idletasks()
-        y = widget.winfo_rooty() - self._inner.winfo_rooty()
-        total = max(self._inner.winfo_height(), 1)
-        self._canvas.yview_moveto(max(0.0, (y - 80) / total))
+    def scroll_to(self, widget, page: str):
+        self.show(page)
+        _, inner, canvas = self._pages[page]
+        canvas.update_idletasks()
+        y = widget.winfo_rooty() - inner.winfo_rooty()
+        total = max(inner.winfo_height(), 1)
+        canvas.yview_moveto(max(0.0, (y - 80) / total))
 
     def _refresh_models(self, pid):
         key = self.s["api_keys"].get(pid, "").strip()
@@ -298,17 +364,15 @@ class SettingsTab:
     def _row(self, parent, label, hint=None):
         row = tk.Frame(parent, bg=CARD)
         row.pack(fill="x", padx=14, pady=4)
-        lab = tk.Frame(row, bg=CARD, width=200)
+        # 이름 칸: 너비는 260으로 맞추고 높이는 설명 글 줄 수만큼 늘어나게 (고정 높이면 설명이 잘렸다)
+        lab = tk.Frame(row, bg=CARD)
         lab.pack(side="left", fill="y")
-        lab.pack_propagate(False)
+        tk.Frame(lab, bg=CARD, width=260, height=1).pack(anchor="w")
         tk.Label(lab, text=label, bg=CARD, fg=TEXT, font=FONT).pack(anchor="w")
         if hint:
-            tk.Label(lab, text=hint, bg=CARD, fg=MUTED, font=font(8), wraplength=190, justify="left").pack(anchor="w")
-            lab.configure(height=40)
-        else:
-            lab.configure(height=28)
+            tk.Label(lab, text=hint, bg=CARD, fg=MUTED, font=FONT_SM, wraplength=250, justify="left").pack(anchor="w")
         body = tk.Frame(row, bg=CARD)
-        body.pack(side="left", fill="x", expand=True)
+        body.pack(side="left", fill="x", expand=True, anchor="n", pady=(2, 0))
         return body
 
     def _entry(self, parent, label, key, hint=None, browse=None, on_change=None, last=False):
@@ -367,7 +431,7 @@ class _CliBox:
         self.state = tk.StringVar(value="확인하는 중…")
         self.state_lbl = tk.Label(head, textvariable=self.state, bg=CARD, fg=MUTED, font=FONT_SM)
         self.state_lbl.pack(side="left", padx=10)
-        tk.Label(box, text=CLI_DESC[pid], bg=CARD, fg=TEXT, font=FONT_SM, justify="left", wraplength=760
+        tk.Label(box, text=CLI_DESC[pid], bg=CARD, fg=TEXT, font=FONT_SM, justify="left", wraplength=1100
                  ).pack(anchor="w", padx=12)
 
         row = tk.Frame(box, bg=CARD)
@@ -378,7 +442,7 @@ class _CliBox:
         self.adv_btn = button(row, "고급 ▾", self.toggle_adv)
         self.adv_btn.pack(side="left", padx=(6, 0))
         self.log = tk.StringVar(value="")
-        tk.Label(box, textvariable=self.log, bg=CARD, fg=MUTED, font=FONT_SM, justify="left", wraplength=760
+        tk.Label(box, textvariable=self.log, bg=CARD, fg=MUTED, font=FONT_SM, justify="left", wraplength=1100
                  ).pack(anchor="w", padx=12, pady=(2, 8))
 
         self.adv = tk.Frame(box, bg=CARD)
@@ -399,7 +463,7 @@ class _CliBox:
         r2 = tk.Frame(self.adv, bg=CARD)
         r2.pack(fill="x", padx=12, pady=(0, 10))
         self.found = tk.StringVar(value="")
-        tk.Label(r2, textvariable=self.found, bg=CARD, fg=MUTED, font=FONT_SM, justify="left", wraplength=600
+        tk.Label(r2, textvariable=self.found, bg=CARD, fg=MUTED, font=FONT_SM, justify="left", wraplength=900
                  ).pack(side="left")
         button(r2, "다른 계정으로 로그인", self.relogin).pack(side="right")
         self.refresh()
@@ -448,7 +512,7 @@ class _CliBox:
             return
         if self.ready:
             self.tab.cli_selected(self.pid)
-            self.log.set(f"✓ 이제 문서를 만들 때 {self.name}을(를) 씁니다.")
+            self.log.set("✓ 이제 문서를 만들 때 이 방식을 씁니다.")
             return
         exe = self.exe()
         if not exe and not messagebox.askyesno(
@@ -480,7 +544,7 @@ class _CliBox:
         self._busy = False
         if ok:
             self.tab.cli_selected(self.pid)
-            self.log.set(f"✓ 준비 완료 — 이제 문서를 만들 때 {self.name}을(를) 씁니다.")
+            self.log.set("✓ 준비 완료 — 이제 문서를 만들 때 이 방식을 씁니다.")
             self.app.status(f"{self.name} 연결 완료")
         else:
             self.log.set(f"✗ {err}")

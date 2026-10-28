@@ -48,7 +48,7 @@ class Updater:
             return
         if rel is None:
             if not silent:
-                messagebox.showinfo("업데이트 확인", f"지금 쓰는 한큐 {cfg.APP_VERSION}이(가) 최신 버전입니다.")
+                messagebox.showinfo("업데이트 확인", f"지금 쓰는 버전({cfg.APP_VERSION})이 최신입니다.")
             return
         if silent and self.app.s.get("skip_version") == rel.version:
             return
@@ -68,20 +68,17 @@ class UpdateDialog(tk.Toplevel):
 
         box = tk.Frame(self, bg=CARD, highlightthickness=1, highlightbackground="#d0d7e2")
         box.pack(fill="both", expand=True, padx=16, pady=16)
-        tk.Label(box, text=f"한큐 {rel.version}이(가) 나왔습니다", bg=CARD, fg=TEXT, font=FONT_H
+        tk.Label(box, text="새 버전이 나왔습니다", bg=CARD, fg=TEXT, font=FONT_H
                  ).pack(anchor="w", padx=18, pady=(16, 2))
-        tk.Label(box, text=f"지금 쓰는 버전: {cfg.APP_VERSION}", bg=CARD, fg=MUTED, font=FONT_SM
+        tk.Label(box, text=f"한큐 {cfg.APP_VERSION} → {rel.version}", bg=CARD, fg=MUTED, font=FONT_SM
                  ).pack(anchor="w", padx=18)
         if rel.notes:
-            notes = tk.Text(box, height=min(10, max(3, rel.notes.count("\n") + 2)), width=58, bg=CARD, fg=TEXT,
-                            relief="flat", font=FONT_SM, wrap="word", highlightthickness=0)
-            notes.insert("1.0", rel.notes)
-            notes.configure(state="disabled")
-            notes.pack(fill="x", padx=18, pady=(10, 0))
-
-        self._how = tk.StringVar(value=self._how_text())
-        tk.Label(box, textvariable=self._how, bg=CARD, fg=MUTED, font=FONT_SM, justify="left", wraplength=470
-                 ).pack(anchor="w", padx=18, pady=(10, 0))
+            tk.Label(box, text=rel.notes, bg=CARD, fg=TEXT, font=FONT_SM, justify="left", wraplength=470
+                     ).pack(anchor="w", padx=18, pady=(10, 0))
+        how = self._how_text()
+        if how:   # 버튼 동작이 평소(받아서 설치)와 다를 때만 알린다
+            tk.Label(box, text=how, bg=CARD, fg=MUTED, font=FONT_SM, justify="left", wraplength=470
+                     ).pack(anchor="w", padx=18, pady=(10, 0))
         self._bar = ttk.Progressbar(box, mode="determinate", length=470, style="Horizontal.TProgressbar")
         self._bar_lbl = tk.StringVar(value="")
         self._bar_lbl_w = tk.Label(box, textvariable=self._bar_lbl, bg=CARD, fg=MUTED, font=FONT_SM)
@@ -109,9 +106,8 @@ class UpdateDialog(tk.Toplevel):
         if not self.rel.asset_url:
             return "이 컴퓨터용 설치 파일이 아직 올라오지 않았습니다. [지금 업데이트]를 누르면 내려받기 페이지를 엽니다."
         if IS_MAC:
-            return "[지금 업데이트]를 누르면 새 버전을 받아 엽니다. 열린 창에서 HanQ를 Applications로 끌어다 놓으세요."
-        return ("[지금 업데이트]를 누르면 새 버전을 받아 설치하고, 한큐가 잠깐 닫혔다가 새 버전으로 다시 열립니다.\n"
-                "설정·API 키·내 양식은 그대로 남습니다.")
+            return "받은 뒤 열리는 창에서 HanQ를 Applications로 끌어다 놓으세요."
+        return ""
 
     def _start(self):
         if not updater.is_installed_app() or not self.rel.asset_url:
