@@ -345,7 +345,8 @@ class GenerateTab:
                 app.sessions.delete(session.id)
             if not cancelled:
                 self.preview.show_message("생성에 실패했습니다.")
-                messagebox.showerror("생성 오류", msg[:800])
+                from .errors import show_ai_error
+                show_ai_error(app, "생성 오류", msg)
             elif self.preview.has_pages:
                 self.preview.set_note("중단됨 — 쓰던 데까지는 [최근 작업]에 남아 있습니다" if kept
                                       else "중단됨 (저장되지 않음)")

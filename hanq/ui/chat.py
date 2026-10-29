@@ -202,11 +202,14 @@ class ChatPanel:
 
         def failed(msg, cancelled):
             app.status("수정 중단" if cancelled else "수정 실패")
-            self.add("sys", "중단했습니다." if cancelled else f"오류: {msg[:300]}")
+            from .errors import chat_text, needs_fix, show_ai_error
+            self.add("sys", "중단했습니다." if cancelled else chat_text(msg))
             if self.history and self.history[-1][0] == "user":
                 self.history.pop()
             self._save_history()
             app.preview_file(self.gen.preview, src)   # 받는 중에 보이던 화면을 원래대로
+            if not cancelled and needs_fix(msg):   # 설정을 고쳐야 하는 오류만 창으로 (나머지는 대화창 글로 충분)
+                show_ai_error(app, "수정 오류", msg)
 
         app.run_job(work, lambda r: self._on_edited(out, src, r), failed, pane=self.gen.preview)
 

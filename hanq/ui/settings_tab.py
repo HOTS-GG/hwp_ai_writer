@@ -229,13 +229,15 @@ class SettingsTab:
         key = self.s["api_keys"].get(pid, "").strip()
         self.app.status(f"{PROVIDERS[pid]} 모델 목록 불러오는 중…")
 
+        from .errors import show_ai_error
+
         def run():
             try:
                 models = providers.list_models(pid, key)
                 self.app.after(0, lambda: self._models_loaded(pid, models))
             except Exception as e:
                 err = str(e)
-                self.app.after(0, lambda: (self.app.status("모델 목록 실패"), messagebox.showerror("모델 목록", err[:400])))
+                self.app.after(0, lambda: (self.app.status("모델 목록 실패"), show_ai_error(self.app, "모델 목록", err)))
         threading.Thread(target=run, daemon=True).start()
 
     def _models_loaded(self, pid, models):

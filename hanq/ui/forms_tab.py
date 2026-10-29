@@ -253,7 +253,8 @@ class FormsTab:
         def failed(msg, cancelled):
             self._info.set(f"{src.name}\n\n{'중단했습니다.' if cancelled else '실패: ' + msg[:200]}")
             if not cancelled:
-                messagebox.showerror("양식으로 만들지 못했습니다", msg[:600])
+                from .errors import show_ai_error
+                show_ai_error(self.app, "양식으로 만들지 못했습니다", msg)
 
         self.app.run_job(work, done, failed, pane=self.preview)
 
