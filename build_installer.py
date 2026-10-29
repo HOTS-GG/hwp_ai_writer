@@ -10,6 +10,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -114,8 +115,16 @@ def build_dmg():
     out_dir.mkdir(exist_ok=True)
     out = out_dir / f"HanQ_{APP_VERSION}_mac_{platform.machine()}.dmg"
     out.unlink(missing_ok=True)
-    subprocess.run(["hdiutil", "create", "-volname", f"HanQ {APP_VERSION}", "-srcfolder", str(stage),
-                    "-ov", "-format", "UDZO", str(out)], check=True)
+    # GitHub 맥 서버에서 hdiutil이 가끔 'Resource busy'로 실패한다 → 잠시 쉬고 다시 시도
+    for attempt in range(5):
+        r = subprocess.run(["hdiutil", "create", "-volname", f"HanQ {APP_VERSION}", "-srcfolder", str(stage),
+                            "-ov", "-format", "UDZO", str(out)])
+        if r.returncode == 0:
+            break
+        if attempt == 4:
+            raise SystemExit(f"hdiutil 실패 (코드 {r.returncode})")
+        print(f"hdiutil 실패 (코드 {r.returncode}) — {10 * (attempt + 1)}초 뒤 다시 시도")
+        time.sleep(10 * (attempt + 1))
     print(f"\n설치 파일: {out}  ({out.stat().st_size / 1024 / 1024:.0f}MB)")
 
 
