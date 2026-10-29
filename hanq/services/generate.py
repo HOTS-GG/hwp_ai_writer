@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..ai import AIConfig
 from ..ai.jsonstream import scan
-from ..ai.prompts import BUILD_SYSTEM, FILL_NO_PLACEHOLDER_NOTE, FILL_SYSTEM, PDF_FORM_NOTE
+from ..ai.prompts import BUILD_SYSTEM, FILL_NO_PLACEHOLDER_NOTE, FILL_SYSTEM, GONGMUN_NOTE, PDF_FORM_NOTE
 from ..doc import DocumentBuilder, Editor, EditPlan, HwpxDocument, Outline
 from ..doc.editor import ApplyReport
 from .context import build_context
@@ -40,6 +40,8 @@ def fill_form(job: Job, form_path: str, out_path: str, request: str, refs: list[
     job.frame(doc, force=True)
 
     note = "" if outline.has_placeholders else f"\n{FILL_NO_PLACEHOLDER_NOTE}\n"
+    if "공문" in Path(form_path).stem or "기안문" in Path(form_path).stem:
+        note += f"\n{GONGMUN_NOTE}\n"
     job.status("참고 자료 읽는 중…" if refs else "AI에게 보낼 내용 준비 중…")
     user = (build_context(request, refs, info, ai.ref_max_chars)
             + f"\n\n## 양식 구조 ({Path(form_path).stem})\n{note}{outline.text}\n\n"

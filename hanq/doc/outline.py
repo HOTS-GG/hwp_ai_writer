@@ -7,11 +7,15 @@
   [B번호]  표 틀 (수정 모드)
   [I번호]  그림 (수정 모드)
 """
+import re
+
 from .document import HwpxDocument
 from .xml import (HWPUNIT_PER_MM, NUMBER_ONLY, P, PIC, PLACEHOLDER, RUN, SUBLIST, SZ, T, TBL, TC, TR, CELLSPAN,
                   cell_text, ensure_t, has_objects, has_secpr, heading_parts, is_blank, para_text)
 
 CELL_PREFIX = "  │ "
+# 예시문은 본문 항목 줄만 (1. 가. ❍ □ ※ 붙임 …). 서명란·'○○학교장 귀하'·공문 끝의 기안자·시행 줄은 고정
+_LIST_ITEM = re.compile(r"\s*(\d+[.)]|[가-하][.)]|[❍□○※*\-·▪■◦•]|붙임)")
 
 
 class TableGroup:
@@ -125,7 +129,7 @@ class Outline:
             if text.strip():
                 if not self.has_placeholders or PLACEHOLDER.search(text):
                     self._add_line(p, text, prefix)
-                elif len(text.strip()) >= 10 and not prefix and self._in_body:
+                elif len(text.strip()) >= 10 and not prefix and self._in_body and _LIST_ITEM.match(text):
                     self._add_line(p, f"(예시문) {text}", prefix, kind="E")
                 else:
                     self._out.append(f"{prefix}(고정) {text}")

@@ -12,6 +12,7 @@ from unittest import mock
 from hanq.ai import AIConfig, Cancelled
 from hanq.doc import HwpxDocument, Outline
 from hanq.doc.render import FOCUS_ATTR
+from hanq.doc.xml import para_text
 from hanq.services import Job, build_document, edit_document, fill_form
 from hanq.services import stream as stream_mod
 
@@ -238,3 +239,16 @@ class ReviewRegressionTest(unittest.TestCase):
                 app_mod._prune_cache()
             self.assertFalse(old.exists())
             self.assertTrue(new.exists())
+
+
+class GongmunFormTest(unittest.TestCase):
+    def test_gongmun_form_fixed_parts(self):
+        """공문 양식: 수신·제목·본문만 채우고, 학교 이름·발신명의·기안자/시행 줄은 고정."""
+        o = Outline(HwpxDocument(str(Path(__file__).parent.parent / "forms" / "07_공문(기안문).hwpx")))
+        filled = " ".join(para_text(p) for p in o.lines.values())
+        self.assertIn("수신", filled)
+        self.assertIn("붙임", filled)
+        for fixed in ("춘 천 고 등 학 교", "춘천고등학교장", "기안자", "시행"):
+            self.assertNotIn(fixed, filled)
+        self.assertNotIn("(예시문) 춘천고등학교장 귀하",
+                         Outline(HwpxDocument(str(Path(__file__).parent.parent / "forms" / "05_관리계획·규정형 문서.hwpx"))).text)
