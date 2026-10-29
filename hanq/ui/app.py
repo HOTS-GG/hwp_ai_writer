@@ -19,6 +19,26 @@ from .theme import APP_NAME, APP_NAME_EN, BG, FONT, HEADER, apply_ttk_style, dis
 _tokens = itertools.count(1)
 
 
+def _prune_cache(days: float = 3):
+    """미리보기 캐시는 계속 쌓이므로, 며칠 지난 것은 켤 때 지운다 (작업 기록은 따로 보관됨)."""
+    import time
+    limit = time.time() - days * 86400
+    try:
+        items = list(CACHE_DIR.iterdir())
+    except OSError:
+        return
+    for p in items:
+        try:
+            if p.stat().st_mtime >= limit:
+                continue
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink()
+        except OSError:
+            pass
+
+
 class Workspace:
     """지금 열려 있는 문서: 작업 파일(버전 목록), 저장한 위치, 제목."""
 
@@ -95,6 +115,7 @@ class App(tk.Tk):
         self.updater.check_on_start()
         if IS_WIN and self.s.get("auto_security_module", True):
             self._auto_security()
+        threading.Thread(target=_prune_cache, daemon=True).start()
 
     # ── 작업 기록 (이어서 하기) ────────────────────────────────────────
     def _offer_resume(self):
@@ -228,8 +249,11 @@ class App(tk.Tk):
     def ai_config(self) -> AIConfig:
         p = self.s["provider"]
         if p in CLI_PROVIDERS:
-            # CLI 방식은 api_key 자리에 실행 파일 경로를 넣는다
-            key = self.s.get("cli_paths", {}).get(p, "").strip() or find_cli(p) or ""
+            # CLI 방식은 api_key 자리에 실행 파일 경로를 넣는다. 지정한 경로가 사라졌으면
+            # (Claude 앱 업데이트로 버전 폴더가 바뀜) 다시 찾는다
+            key = self.s.get("cli_paths", {}).get(p, "").strip()
+            if not key or not Path(key).exists():
+                key = find_cli(p) or ""
             model = self.s["models"].get(p, "").strip()
         else:
             key = self.s["api_keys"].get(p, "").strip()

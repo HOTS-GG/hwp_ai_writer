@@ -95,7 +95,7 @@ class LineStreamer:
 
     def replay(self, data: dict, seconds: float = 4.0):
         """스트리밍이 안 되는 경우(Codex): 다 받은 답을 위에서부터 한 줄씩 채워 보여준다."""
-        if not self.job.live:
+        if not self.job.visible:   # 화면이 없으면 기다릴 이유가 없다 (끝에 한 번에 반영)
             return
         slots = [(k, v) for k, v in (data.get("slots") or {}).items() if k not in self._done]
         tables = [(k, v) for k, v in (data.get("tables") or {}).items() if k not in self._done]

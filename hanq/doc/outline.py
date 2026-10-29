@@ -37,6 +37,9 @@ class Outline:
         self.boxes: dict[str, object] = {}
         self.images: dict[str, object] = {}
         self._out: list[str] = []
+        # 장 제목 상자의 번호 칸: 번호는 프로그램이 매기므로 AI에게 고칠 줄로 내놓지 않는다
+        # (AI가 번호 칸을 바꾸면 장 제목으로 알아보지 못해 새 장·장 번호 다시 매기기가 실패했다)
+        self._heading_num_cells: set = set()
         self._page_map = page_map
         self._top_index = 0
         self._cur_page = None
@@ -114,6 +117,7 @@ class Outline:
                 hp_ = heading_parts(p)
                 if hp_ is not None:
                     self._in_body = True
+                    self._heading_num_cells.add(hp_[1])
                     hid = f"H{len(self.headings) + 1}"
                     self.headings[hid] = p
                     self._out.append(f"[{hid}] ===== 장 {cell_text(hp_[1])}. {cell_text(hp_[2])} =====")
@@ -197,6 +201,8 @@ class Outline:
                 i = j + 1
                 continue
             for tc in trs[i].findall(TC):
+                if tc in self._heading_num_cells:
+                    continue
                 sl = tc.find(SUBLIST)
                 if sl is not None:
                     self._walk(sl, prefix + CELL_PREFIX)

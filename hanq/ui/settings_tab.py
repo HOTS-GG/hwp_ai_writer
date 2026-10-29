@@ -471,7 +471,11 @@ class _CliBox:
 
     # ── 상태 ──
     def exe(self) -> str:
-        return self.s.get("cli_paths", {}).get(self.pid, "").strip() or providers.find_cli(self.pid) or ""
+        import os
+        path = self.s.get("cli_paths", {}).get(self.pid, "").strip()
+        if path and os.path.exists(path):
+            return path
+        return providers.find_cli(self.pid) or ""   # 지정한 경로가 사라졌으면(앱 업데이트) 다시 찾는다
 
     def refresh(self):
         from ..ai import cli_setup

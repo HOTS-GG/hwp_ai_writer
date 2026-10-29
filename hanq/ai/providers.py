@@ -329,6 +329,18 @@ def _complete_cli(cfg: AIConfig, system: str, user: str, images: list, stream: _
         raise LLMError(f"{'Claude Code' if cfg.provider == 'claude_code' else 'Codex'}를 찾을 수 없습니다.\n"
                        "설정 탭의 안내대로 설치하거나 실행 파일 위치를 지정해 주세요.")
     work = tempfile.mkdtemp(prefix="hanq_cli_")
+    try:
+        text = _run_cli_provider(cfg, system, user, images, stream, exe, work)
+    finally:   # 오류·중단 때도 임시 폴더를 남기지 않는다
+        shutil.rmtree(work, ignore_errors=True)
+    text = text.strip()
+    if not text:
+        raise LLMError("AI 응답이 비어 있습니다.")
+    return text
+
+
+def _run_cli_provider(cfg: AIConfig, system: str, user: str, images: list, stream: _Stream, exe: str,
+                      work: str) -> str:
     if cfg.provider == "claude_code":
         if images:
             look = ("먼저 Read 도구로 다음 이미지 파일들을 열어 보세요(다른 파일은 읽지 말 것):\n"
@@ -365,7 +377,7 @@ def _complete_cli(cfg: AIConfig, system: str, user: str, images: list, stream: _
         if final.get("error"):
             raise LLMError(f"Claude Code 오류: {final['error'][:600]}" + _login_hint(exe, final["error"]))
         # 최종 답(result)이 가장 정확하다. 스트리밍 조각은 화면용.
-        text = final.get("text") or stream.text()
+        return final.get("text") or stream.text()
     else:
         note = f"{IMAGE_NOTE}\n\n" if images else ""
         prompt = (f"{system}\n\n---\n\n{note}{user}\n\n"
@@ -380,14 +392,9 @@ def _complete_cli(cfg: AIConfig, system: str, user: str, images: list, stream: _
         stdout = _run_cli(cmd, prompt, cfg.timeout, work, stream)
         try:
             with open(out_file, encoding="utf-8") as f:
-                text = f.read()
+                return f.read()
         except OSError:
-            text = stdout
-    shutil.rmtree(work, ignore_errors=True)
-    text = text.strip()
-    if not text:
-        raise LLMError("AI 응답이 비어 있습니다.")
-    return text
+            return stdout
 
 
 # ── 모델 목록 ──────────────────────────────────────────────────────────────────

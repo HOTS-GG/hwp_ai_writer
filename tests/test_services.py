@@ -212,3 +212,29 @@ class HangulLiveTest(unittest.TestCase):
             res = live._render("bytes", self._frame_bytes())
             live.close()
             self.assertGreaterEqual(len(res.pages), 2)
+
+
+class ReviewRegressionTest(unittest.TestCase):
+    def test_replay_skips_wait_without_preview(self):
+        """미리보기를 끈 채 자동 저장(on_draft)만 켜져 있으면 replay가 기다리지 않는다."""
+        from hanq.doc import Editor
+        doc = HwpxDocument(str(PLAN_FORM))
+        outline = Outline(doc)
+        job = Job(on_draft=lambda b: None)
+        s = stream_mod.LineStreamer(Editor(doc, outline), job)
+        slots = {lid: "x" for lid in list(outline.lines)[:30]}
+        t = time.monotonic()
+        s.replay({"slots": slots})
+        self.assertLess(time.monotonic() - t, 0.5)
+
+    def test_prune_cache_removes_only_old(self):
+        import os
+        from hanq.ui import app as app_mod
+        with tempfile.TemporaryDirectory() as d:
+            old, new = Path(d) / "old", Path(d) / "new.txt"
+            old.mkdir(); (old / "a.png").write_bytes(b"1"); new.write_text("n")
+            os.utime(old, (0, 0))
+            with mock.patch.object(app_mod, "CACHE_DIR", Path(d)):
+                app_mod._prune_cache()
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())

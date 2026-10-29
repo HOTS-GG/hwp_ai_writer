@@ -39,6 +39,11 @@ class Job:
         """받는 대로 문서에 반영할지 (화면에 보이거나, 쓰는 도중의 문서를 저장할 때)."""
         return self.on_frame is not None or self.on_draft is not None
 
+    @property
+    def visible(self) -> bool:
+        """실시간 화면이 있는지. 한 줄씩 보여 주는 연출(기다림)은 화면이 있을 때만 한다."""
+        return self.on_frame is not None
+
     def frame(self, doc, focus=(), force: bool = False):
         """문서의 지금 모습을 화면에 보낸다. focus 줄(hp:p)은 노랗게 강조한다. 너무 잦으면 건너뛴다."""
         now = time.monotonic()

@@ -130,7 +130,7 @@ class _LiveBuilder:
         self._add(part.items.get("blocks", []), part.scalars)
 
     def replay(self, spec: dict, seconds: float = 4.0):
-        if not self.job.live:
+        if not self.job.visible:
             return
         blocks = [b for b in (spec.get("blocks") or [])]
         delay = min(0.12, seconds / max(len(blocks) - self.n, 1))
