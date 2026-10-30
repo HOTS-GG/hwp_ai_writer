@@ -1,4 +1,6 @@
 ﻿"""웹 검색 연결, 표 안의 표, 출처 정리."""
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -65,10 +67,12 @@ class WebSearchTest(unittest.TestCase):
             if on_line:
                 on_line('{"type":"result","result":"{}"}')
             return ""
-        with mock.patch.object(providers, "_run_cli", fake_run), mock.patch("os.path.exists", return_value=True):
-            providers.complete(AIConfig("claude_code", "claude.exe", "", web_search=True), "S", "U")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(providers, "_run_cli", fake_run):
+            exe = os.path.join(d, "claude.exe")   # 실제로 있는 파일 (실행하지는 않음)
+            open(exe, "wb").close()
+            providers.complete(AIConfig("claude_code", exe, "", web_search=True), "S", "U")
             self.assertIn("WebSearch", seen["cmd"])
-            providers.complete(AIConfig("claude_code", "claude.exe", "", web_search=False), "S", "U")
+            providers.complete(AIConfig("claude_code", exe, "", web_search=False), "S", "U")
             self.assertNotIn("WebSearch", seen["cmd"])
             self.assertNotIn("--allowedTools", seen["cmd"])
 
