@@ -283,8 +283,9 @@ def is_simple_table_para(p) -> bool:
     return tbl.find(f".//{TR}//{TBL}") is None
 
 
-def build_table_paragraph(proto_p, columns: list, rows: list):
-    """표가 든 문단(머리행 + 데이터 행)을 복제해 열·행 수가 다른 새 표 문단을 만든다."""
+def build_table_paragraph(proto_p, columns: list, rows: list, width: int | None = None):
+    """표가 든 문단(머리행 + 데이터 행)을 복제해 열·행 수가 다른 새 표 문단을 만든다.
+    width(HWPUNIT)를 주면 표 전체 폭을 그에 맞춘다 (표 칸 안에 넣을 때)."""
     n = len(columns)
     p = copy.deepcopy(proto_p)
     strip_lineseg(p)
@@ -294,7 +295,9 @@ def build_table_paragraph(proto_p, columns: list, rows: list):
     hdr, first, last = trs[0], trs[1] if len(trs) > 1 else trs[0], trs[-1]
     mid = trs[2] if len(trs) > 3 else first
     hdr_cells = hdr.findall(TC)
-    total_w = sum(int(tc.find(CELLSZ).get("width")) for tc in hdr_cells)
+    total_w = width or sum(int(tc.find(CELLSZ).get("width")) for tc in hdr_cells)
+    if tbl.find(SZ) is not None:
+        tbl.find(SZ).set("width", str(total_w))
     lens = []
     for j in range(n):
         col = [str(columns[j])] + [str(r[j]) if isinstance(r, list) and j < len(r) else "" for r in rows]

@@ -72,6 +72,7 @@ DEFAULTS = {
     "temperature": 0.4,
     "request_timeout": 600,
     "ai_sees_screen": True,
+    "web_search": True,
     "max_screen_pages": 6,
     "window_geometry": "1480x880",
     "window_zoomed": False,

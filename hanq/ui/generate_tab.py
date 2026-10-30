@@ -388,6 +388,9 @@ class GenerateTab:
         if result.report.missed:
             intro += "\n⚠ " + ", ".join(result.report.missed)
         self.chat.reset(intro)
+        if result.sources:
+            from .chat import with_sources
+            self.chat.add("ai", with_sources("문서를 쓰면서 웹에서 찾아 참고했습니다.", result.sources))
         if app.s.get("open_after_save") and saved:
             open_path(saved)
         app.preview_file(self.preview, saved or path)

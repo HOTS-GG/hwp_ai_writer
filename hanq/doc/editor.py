@@ -11,7 +11,7 @@ from lxml import etree
 
 from .document import HwpxDocument
 from .outline import Outline, TableGroup
-from .xml import (P, ROMAN, RUN, SUBLIST, T, TBL, TC, TEXT_PATH, TR, build_table_paragraph, cell_text, clone_line,
+from .xml import (CELLSZ, P, ROMAN, RUN, SUBLIST, T, TBL, TC, TEXT_PATH, TR, build_table_paragraph, cell_text, clone_line,
                   drop_if_empty, has_objects, has_secpr, heading_parts, is_blank, is_simple_table_para, leading_ws,
                   mark_changed, marker_of, new_id, para_text, renumber_table, set_cell, set_para_text, set_t, strip_lineseg,
                   t_text, top_para)
@@ -447,15 +447,48 @@ class Editor:
         return n
 
     # ── 줄 끼워 넣기 ────────────────────────────────────────────────────
-    def _anchor_para(self, ref: str):
+    def _anchor_para(self, ref: str, in_cell: bool = False):
         o = self.outline
         if ref in o.headings:
             return o.headings[ref]
         p = o.lines.get(ref)
         if p is None or p.getparent() is None:
             return None
-        # 표 칸 안의 줄이면, 그 표를 담은 본문 문단(섹션 바로 아래 문단)을 기준으로 삼는다
+        if in_cell and p.getparent().tag == SUBLIST:
+            return p   # 표 칸 안의 줄: 그 칸 안에 넣는다
+        # 그 밖에는 그 표를 담은 본문 문단(섹션 바로 아래 문단)을 기준으로 삼는다
         return top_para(p)
+
+    def _table_proto(self):
+        """새 표의 본보기: 본문의 단순한 표 → 문서 어디든(표 안 포함) 단순한 표 → 장 제목이 아닌 아무 표."""
+        proto = self._protos().get("table")
+        if proto is not None:
+            return proto
+        simple, other = None, None
+        for tbl in (t for root in self.doc.ordered_sections() for t in root.iter(TBL)):
+            p = tbl.getparent().getparent() if tbl.getparent() is not None else None
+            if p is None or p.tag != P or heading_parts(p) is not None:
+                continue
+            if simple is None and is_simple_table_para(p):
+                simple = p
+            if other is None and tbl.find(f".//{TR}//{TBL}") is None:
+                other = p
+        return simple if simple is not None else other
+
+    def _new_table(self, spec: dict, anchor):
+        """inserts의 table({columns, rows})로 새 표 문단을 만든다. 칸 안이면 그 칸 폭에 맞춘다."""
+        cols = [str(c) for c in (spec.get("columns") or [])]
+        proto = self._table_proto()
+        if not cols or proto is None:
+            return None
+        width = None
+        sl = anchor.getparent()
+        if sl is not None and sl.tag == SUBLIST:
+            sz = sl.getparent().find(CELLSZ)
+            if sz is not None:
+                width = max(int(sz.get("width", "0")) - 1200, 2000)   # 칸 안쪽 여백만큼 줄임
+        rows = [r if isinstance(r, list) else [r] for r in (spec.get("rows") or [])]
+        return build_table_paragraph(proto, cols, rows, width)
 
     @staticmethod
     def _plain_line(base, text: str):
@@ -487,11 +520,13 @@ class Editor:
         neighbor = anchor if (before or heading_parts(anchor) is None) else anchor.getnext()
         if neighbor is not None and (neighbor.tag != P or has_objects(neighbor) or not para_text(neighbor).strip()):
             neighbor = None
+        # 표 칸 안: 본문 줄 모양(폭·들여쓰기)을 가져오면 칸을 벗어나므로 그 칸의 줄 모양을 따른다
+        in_cell = anchor.getparent() is not None and anchor.getparent().tag == SUBLIST
         out = []
         for line in lines:
             line = str(line)
             kind = marker_of(line)
-            proto = protos.get(kind) if kind != "text" else None
+            proto = protos.get(kind) if kind != "text" and not in_cell else None
             if proto is None:
                 proto = neighbor if neighbor is not None else protos.get("text", fallback)
             out.append(clone_line(proto, line) if proto is not None else self._plain_line(anchor, line))
@@ -500,13 +535,18 @@ class Editor:
     def insert_lines(self, inserts: list) -> int:
         n = 0
         for ins in inserts:
-            if not ins.get("lines"):
+            table = ins.get("table") if isinstance(ins.get("table"), dict) else None
+            if not ins.get("lines") and not table:
                 continue
             before = ins.get("before")
-            anchor = self._anchor_para(str(before or ins.get("after", "")).strip())
+            anchor = self._anchor_para(str(before or ins.get("after", "")).strip(), in_cell=True)
             if anchor is None:
                 continue
-            new_ps = self._make_lines(anchor, ins["lines"], bool(before))
+            new_ps = self._make_lines(anchor, ins.get("lines") or [], bool(before))
+            if table:
+                tp = self._new_table(table, anchor)
+                if tp is not None:
+                    new_ps.append(tp)
             if before:
                 for np_ in new_ps:
                     anchor.addprevious(np_)

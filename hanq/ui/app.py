@@ -262,7 +262,8 @@ class App(tk.Tk):
                         temperature=float(self.s["temperature"]), timeout=int(self.s["request_timeout"]),
                         ref_max_chars=int(self.s["ref_max_chars"]),
                         send_images=bool(self.s.get("ai_sees_screen", True)),
-                        max_images=int(self.s.get("max_screen_pages", 6)))
+                        max_images=int(self.s.get("max_screen_pages", 6)),
+                        web_search=bool(self.s.get("web_search", True)))
 
     def check_ai(self, ai: AIConfig) -> bool:
         if ai.api_key:

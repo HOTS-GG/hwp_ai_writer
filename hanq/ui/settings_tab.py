@@ -107,6 +107,8 @@ class SettingsTab:
         self._spin(c, "참고 자료 최대 글자 수", "ref_max_chars", 2000, 200000, 2000)
         self._spin(c, "응답 대기 시간 (초)", "request_timeout", 60, 1800, 30)
         self._check(c, "수정 요청 때 AI에게 한글 화면(쪽 이미지)과 쪽 나눔 보여주기", "ai_sees_screen")
+        self._check(c, "AI가 웹 검색으로 자료 찾기 (찾은 출처 링크를 함께 알려 줌, 그림·영상은 만들지 않음)",
+                    "web_search")
         self._spin(c, "AI에게 보여줄 최대 쪽 수", "max_screen_pages", 1, 20, 1, last=True)
         self._build_update(p)
 

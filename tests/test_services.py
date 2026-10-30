@@ -20,7 +20,7 @@ from .helpers import PLAN_FORM, REPORT_FORM, find_line
 
 
 def fake_complete(answer: str, chunk: int = 7, stop_after: int | None = None):
-    def complete(cfg, system, user, images=None, on_text=None, on_progress=None, stop=None):
+    def complete(cfg, system, user, images=None, on_text=None, on_progress=None, stop=None, on_note=None):
         complete.user = user
         for i in range(chunk, len(answer) + chunk, chunk):
             if stop is not None and stop.is_set():

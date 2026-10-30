@@ -13,7 +13,7 @@ from ..doc import DocumentBuilder, Editor, EditPlan, HwpxDocument, Outline
 from ..doc.editor import ApplyReport
 from .context import build_context
 from .job import Job
-from .stream import LineStreamer, ask_json
+from .stream import LineStreamer, ask_json, sources_of
 
 
 @dataclass
@@ -22,6 +22,7 @@ class Result:
     title: str = ""
     report: ApplyReport = field(default_factory=ApplyReport)
     warning: str = ""
+    sources: list = field(default_factory=list)   # 웹 검색 출처 [(제목, 주소)]
 
 
 def describe_form(path: str) -> str:
@@ -58,7 +59,7 @@ def fill_form(job: Job, form_path: str, out_path: str, request: str, refs: list[
     report = editor.apply(plan)
     job.frame(doc, force=True)
     doc.save(out_path)
-    return Result(out_path, _guess_title(plan.lines), report)
+    return Result(out_path, _guess_title(plan.lines), report, sources=sources_of(data))
 
 
 def build_document(job: Job, base_style_path: str, out_path: str, request: str, refs: list[str], info: dict,
@@ -82,7 +83,7 @@ def build_document(job: Job, base_style_path: str, out_path: str, request: str, 
     builder = DocumentBuilder(base)
     doc = builder.build(spec, out_path)
     job.frame(doc, force=True)
-    return Result(out_path, str(spec.get("title", "")))
+    return Result(out_path, str(spec.get("title", "")), sources=sources_of(spec))
 
 
 class _LiveBuilder:

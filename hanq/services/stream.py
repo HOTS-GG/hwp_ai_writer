@@ -30,14 +30,15 @@ def dump(text: str, name: str):
 
 def ask_json(ai: AIConfig, system: str, user: str, job, images=None, on_text=None, label="AI 작성 중") -> dict:
     raw = complete(ai, system, user, images=images, on_text=on_text, stop=job.stop,
-                   on_progress=lambda n: job.status(_progress(label, n)))
+                   on_progress=lambda n: job.status(_progress(label, n)),
+                   on_note=lambda msg: job.status(f"{label}… {msg}…"))
     dump(raw, "last_response.txt")
     try:
         return parse_json(raw)
     except JSONError as e:
         first_err = str(e)
     job.status("응답 형식 오류 — AI에게 교정 요청 중…")
-    fix_cfg = AIConfig(**{**ai.__dict__, "temperature": 0.0})
+    fix_cfg = AIConfig(**{**ai.__dict__, "temperature": 0.0, "web_search": False})
     fixed = complete(fix_cfg, FIX_SYSTEM, f"오류: {first_err}\n\n교정할 텍스트:\n{raw}", stop=job.stop,
                      on_progress=lambda n: job.status(_progress("JSON 교정 중", n)))
     dump(fixed, "last_response_fixed.txt")
@@ -47,6 +48,22 @@ def ask_json(ai: AIConfig, system: str, user: str, job, images=None, on_text=Non
         hint = ("응답이 중간에 잘렸을 수 있습니다. 설정에서 '최대 출력 토큰'을 늘려주세요."
                 if not raw.rstrip().endswith("}") else "다른 모델로 다시 시도해 보세요.")
         raise LLMError(f"{e}\n\n{hint}\n원본 응답: {CACHE_DIR / 'last_response.txt'}")
+
+
+def sources_of(data: dict) -> list[tuple[str, str]]:
+    """AI가 웹 검색으로 쓴 출처·찾은 자료 링크 [(제목, 주소)]. http(s) 주소만, 같은 주소는 한 번."""
+    out, seen = [], set()
+    for s in data.get("sources") or []:
+        if isinstance(s, str):
+            title, url = "", s
+        elif isinstance(s, dict):
+            title, url = str(s.get("title", "")).strip(), str(s.get("url", "")).strip()
+        else:
+            continue
+        if url.startswith(("http://", "https://")) and url not in seen:
+            seen.add(url)
+            out.append((title or url, url))
+    return out[:8]
 
 
 class LineStreamer:

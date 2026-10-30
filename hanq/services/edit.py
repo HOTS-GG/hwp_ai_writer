@@ -7,7 +7,7 @@ from ..doc import Editor, EditPlan, HwpxDocument, Outline
 from ..doc.editor import ApplyReport
 from .context import read_references
 from .job import Job
-from .stream import LineStreamer, ask_json
+from .stream import LineStreamer, ask_json, sources_of
 
 
 @dataclass
@@ -17,6 +17,7 @@ class EditResult:
     report: ApplyReport = field(default_factory=ApplyReport)
     warning: str = ""
     pages: tuple | None = None    # (고치기 전 쪽 수, 고친 뒤 쪽 수) — 한글로 확인했을 때만
+    sources: list = field(default_factory=list)   # 웹 검색 출처 [(제목, 주소)]
 
 
 def edit_document(job: Job, path: str, out_path: str, instruction: str, history: list[tuple[str, str]],
@@ -59,4 +60,4 @@ def edit_document(job: Job, path: str, out_path: str, instruction: str, history:
     if changed:
         doc.save(out_path)
         job.frame(doc, force=True)
-    return EditResult(str(data.get("reply", "")).strip(), changed, report, warning)
+    return EditResult(str(data.get("reply", "")).strip(), changed, report, warning, sources=sources_of(data))

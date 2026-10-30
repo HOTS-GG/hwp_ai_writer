@@ -25,6 +25,16 @@ CLI_NAMES = {"claude_code": "claude", "codex": "codex"}
 IMAGE_NOTE = ("첨부한 이미지는 지금 문서를 한글에서 연 실제 화면(1쪽부터 차례로)입니다. "
               "글자 목록에 없는 쪽 나눔, 표 크기, 빈 공간, 넘친 내용은 이미지를 보고 판단하세요.")
 
+WEB_SEARCH_RULE = """웹 검색을 쓸 수 있습니다 (NotebookLM처럼 자료를 찾아 문서에 반영):
+- 최신 제도·지침·통계·사례·행사 정보처럼 사실 확인이 필요하면 웹 검색으로 찾아 반영. 요청과 참고 자료로 충분하면 검색하지 않음
+- 정부·교육청·공공기관·학술 자료 같은 믿을 만한 출처를 먼저 씀. 찾은 사실만 쓰고 지어내지 않음
+- 이미지·영상·음성·그림은 절대 새로 만들지 않음. 사진·영상·서식 파일·사이트처럼 글이 아닌 자료를 요청받으면
+  웹에서 찾아 그 링크만 줌 (파일을 내려받거나 문서에 그림을 넣지 않음)
+- 쓴 출처와 찾은 자료 링크는 JSON 최상위의 "sources": [{"title": "자료 제목", "url": "https://…"}]에 넣음
+  (최대 8개, 검색 결과에서 실제로 확인한 주소만. 주소를 지어내지 않음)
+- 문서 본문에 링크 줄을 넣는 것은 사용자가 원할 때만 (예: '※ 참고: 자료 제목(주소)')
+- 검색 과정 설명 없이 최종 JSON만 출력"""
+
 
 class LLMError(Exception):
     pass
@@ -46,6 +56,7 @@ class AIConfig:
     ref_max_chars: int = 30000
     send_images: bool = True
     max_images: int = 6
+    web_search: bool = False   # 웹 검색 허용 (글·링크만 찾음. 그림·영상은 만들지 않음)
 
     @property
     def is_cli(self) -> bool:
@@ -60,12 +71,18 @@ class AIConfig:
 class _Stream:
     """받은 조각을 모으고, on_text·on_progress를 부르고, 중단 여부를 확인한다."""
 
-    def __init__(self, on_text, on_progress, stop):
+    def __init__(self, on_text, on_progress, stop, on_note=None):
         self.parts: list[str] = []
         self.size = 0
         self.on_text = on_text
         self.on_progress = on_progress
         self.stop = stop
+        self.on_note = on_note
+
+    def note(self, msg: str):
+        """받는 글자와 따로 알릴 진행 상황 (예: 웹 검색 중)."""
+        if self.on_note:
+            self.on_note(msg)
 
     def check(self):
         if self.stop is not None and self.stop.is_set():
@@ -127,10 +144,12 @@ def _b64(path: str) -> str:
 # ── 진입점 ──────────────────────────────────────────────────────────────────
 
 def complete(cfg: AIConfig, system: str, user: str, images: list | None = None,
-             on_text=None, on_progress=None, stop: threading.Event | None = None) -> str:
+             on_text=None, on_progress=None, stop: threading.Event | None = None, on_note=None) -> str:
     """AI 답을 받는다. on_text(전체 글)는 받는 중에 계속, on_progress(n)는 받은 글자 수(CLI는 -경과초)."""
     images = [p for p in (images or []) if os.path.exists(p)]
-    stream = _Stream(on_text, on_progress, stop)
+    stream = _Stream(on_text, on_progress, stop, on_note)
+    if cfg.web_search:
+        system = f"{system}\n\n{WEB_SEARCH_RULE}"
     if cfg.is_cli:
         return _complete_cli(cfg, system, user, images, stream)
     if not cfg.api_key:
@@ -156,26 +175,53 @@ def complete(cfg: AIConfig, system: str, user: str, images: list | None = None,
 
 
 def _claude(cfg, system, user, images, stream):
+    body = {"model": cfg.model, "max_tokens": cfg.max_tokens, "temperature": cfg.temperature,
+            "system": system, "stream": True,
+            "messages": [{"role": "user", "content": [
+                *({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(p)}}
+                  for p in images),
+                {"type": "text", "text": user}]}]}
+    if cfg.web_search:
+        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        json={"model": cfg.model, "max_tokens": cfg.max_tokens, "temperature": cfg.temperature,
-              "system": system, "stream": True,
-              "messages": [{"role": "user", "content": [
-                  *({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(p)}}
-                    for p in images),
-                  {"type": "text", "text": user}]}]},
-        stream=True, timeout=cfg.timeout)
+        json=body, stream=True, timeout=cfg.timeout)
     _check(resp)
     for ev in _sse(resp, stream):
-        if ev.get("type") == "content_block_delta":
+        if ev.get("type") == "content_block_start" and ev.get("content_block", {}).get("type") == "server_tool_use":
+            stream.note("웹 검색 중")
+        elif ev.get("type") == "content_block_delta" and ev["delta"].get("type") == "text_delta":
             stream.push(ev["delta"].get("text", ""))
         elif ev.get("type") == "error":
             raise LLMError(ev.get("error", {}).get("message", str(ev)))
 
 
+def _openai_search(cfg, system, user, images, stream):
+    """OpenAI 웹 검색은 Responses API에서만 된다."""
+    content = [{"type": "input_text", "text": user}] + [
+        {"type": "input_image", "image_url": f"data:image/png;base64,{_b64(p)}"} for p in images]
+    body = {"model": cfg.model, "stream": True, "instructions": system, "max_output_tokens": cfg.max_tokens,
+            "tools": [{"type": "web_search"}],
+            "input": [{"role": "user", "content": content}]}
+    resp = requests.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {cfg.api_key}"},
+                         json=body, stream=True, timeout=cfg.timeout)
+    _check(resp)
+    for ev in _sse(resp, stream):
+        t = ev.get("type", "")
+        if t == "response.output_text.delta":
+            stream.push(ev.get("delta", ""))
+        elif t.startswith("response.web_search_call.") and t.endswith("searching"):
+            stream.note("웹 검색 중")
+        elif t in ("error", "response.failed"):
+            err = ev.get("error") or (ev.get("response") or {}).get("error") or ev
+            raise LLMError(str(err.get("message", err) if isinstance(err, dict) else err))
+
+
 def _openai(cfg, system, user, images, stream):
-    url = ("https://api.openai.com/v1/chat/completions" if cfg.provider == "openai"
+    if cfg.web_search and cfg.provider == "openai":
+        return _openai_search(cfg, system, user, images, stream)
+    url =("https://api.openai.com/v1/chat/completions" if cfg.provider == "openai"
            else "https://openrouter.ai/api/v1/chat/completions")
     content = [{"type": "text", "text": user}] + [
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_b64(p)}"}} for p in images]
@@ -187,6 +233,8 @@ def _openai(cfg, system, user, images, stream):
     else:
         body["max_tokens"] = cfg.max_tokens
         body["temperature"] = cfg.temperature
+        if cfg.web_search:
+            body["plugins"] = [{"id": "web", "max_results": 5}]
     resp = requests.post(url, headers={"Authorization": f"Bearer {cfg.api_key}"}, json=body,
                          stream=True, timeout=cfg.timeout)
     _check(resp)
@@ -199,15 +247,17 @@ def _openai(cfg, system, user, images, stream):
 
 def _gemini(cfg, system, user, images, stream):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.model}:streamGenerateContent?alt=sse"
-    resp = requests.post(
-        url, headers={"x-goog-api-key": cfg.api_key},
-        json={"systemInstruction": {"parts": [{"text": system}]},
-              "contents": [{"role": "user", "parts": [
-                  *({"inline_data": {"mime_type": "image/png", "data": _b64(p)}} for p in images),
-                  {"text": user}]}],
-              "generationConfig": {"maxOutputTokens": cfg.max_tokens, "temperature": cfg.temperature,
-                                   "responseMimeType": "application/json"}},
-        stream=True, timeout=cfg.timeout)
+    body = {"systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [
+                *({"inline_data": {"mime_type": "image/png", "data": _b64(p)}} for p in images),
+                {"text": user}]}],
+            "generationConfig": {"maxOutputTokens": cfg.max_tokens, "temperature": cfg.temperature,
+                                 "responseMimeType": "application/json"}}
+    if cfg.web_search:
+        # 구글 검색 연결은 JSON 전용 응답 설정과 함께 쓸 수 없어 뺀다 (JSON은 프롬프트로 요구)
+        body["tools"] = [{"google_search": {}}]
+        del body["generationConfig"]["responseMimeType"]
+    resp = requests.post(url, headers={"x-goog-api-key": cfg.api_key}, json=body, stream=True, timeout=cfg.timeout)
     _check(resp)
     for ev in _sse(resp, stream):
         for cand in ev.get("candidates", []):
@@ -342,16 +392,21 @@ def _complete_cli(cfg: AIConfig, system: str, user: str, images: list, stream: _
 def _run_cli_provider(cfg: AIConfig, system: str, user: str, images: list, stream: _Stream, exe: str,
                       work: str) -> str:
     if cfg.provider == "claude_code":
+        web = " 필요하면 WebSearch·WebFetch로 웹 자료를 찾아도 됩니다." if cfg.web_search else ""
         if images:
             look = ("먼저 Read 도구로 다음 이미지 파일들을 열어 보세요(다른 파일은 읽지 말 것):\n"
                     + "\n".join(images) + f"\n{IMAGE_NOTE}\n\n")
-            rule = "중요: 위 이미지 외의 파일을 읽거나 쓰거나 명령을 실행하지 말고, 요청한 JSON만 답하세요."
+            rule = f"중요: 위 이미지 외의 파일을 읽거나 쓰거나 명령을 실행하지 말고, 요청한 JSON만 답하세요.{web}"
         else:
-            look, rule = "", "중요: 파일을 읽거나 쓰거나 명령을 실행하지 말고, 요청한 JSON만 바로 답하세요."
+            look, rule = "", f"중요: 파일을 읽거나 쓰거나 명령을 실행하지 말고, 요청한 JSON만 답하세요.{web}"
         prompt = f"{system}\n\n---\n\n{look}{user}\n\n{rule}"
         cmd = [exe, "-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+        # 허락한 도구만 쓴다 (그 밖의 도구는 -p 모드에서 거절됨): 화면 이미지 읽기, 웹 검색
+        tools = (["Read"] if images else []) + (["WebSearch", "WebFetch"] if cfg.web_search else [])
+        if tools:
+            cmd += ["--allowedTools", *tools]
         if images:
-            cmd += ["--allowedTools", "Read", "--add-dir", os.path.dirname(images[0])]
+            cmd += ["--add-dir", os.path.dirname(images[0])]
         if cfg.model:
             cmd += ["--model", cfg.model]
         final = {}
@@ -364,7 +419,11 @@ def _run_cli_provider(cfg: AIConfig, system: str, user: str, images: list, strea
             t = ev.get("type")
             if t == "stream_event":
                 e = ev.get("event", {})
-                if e.get("type") == "content_block_delta" and e.get("delta", {}).get("type") == "text_delta":
+                if e.get("type") == "content_block_start" and e.get("content_block", {}).get("type") == "tool_use":
+                    name = e["content_block"].get("name", "")
+                    if name.startswith("Web"):
+                        stream.note("웹 검색 중" if name == "WebSearch" else "웹 페이지 읽는 중")
+                elif e.get("type") == "content_block_delta" and e.get("delta", {}).get("type") == "text_delta":
                     stream.push(e["delta"].get("text", ""))
                 elif e.get("type") == "message_start" and stream.size:
                     stream.push("\n")   # 이미지 읽기 뒤 새 답 (앞 답과 섞이지 않게)
@@ -384,6 +443,9 @@ def _run_cli_provider(cfg: AIConfig, system: str, user: str, images: list, strea
                   "중요: 파일을 읽거나 쓰거나 명령을 실행하지 말고, 요청한 JSON만 바로 답하세요.")
         out_file = os.path.join(work, "answer.txt")
         cmd = [exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", out_file]
+        if cfg.web_search:
+            # 버전에 따라 설정 이름이 달라 둘 다 준다 (모르는 설정은 무시됨)
+            cmd += ["-c", 'web_search="live"', "-c", "tools.web_search=true"]
         for img in images:
             cmd += ["--image", img]
         if cfg.model:

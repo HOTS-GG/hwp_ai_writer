@@ -1,7 +1,9 @@
 """AI 수정 대화: 열린 문서를 말로 고친다. 고칠 때마다 버전이 쌓이고 되돌릴 수 있다."""
 import datetime
+import re
 import shutil
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -13,7 +15,17 @@ WELCOME = ("문서를 생성하거나 [파일 열기]로 HWPX·HWP 문서를 불
            "예) '운영 개요의 장소를 시청각실로 바꿔줘'\n"
            "    '추진 목적을 3개로 늘려줘'\n"
            "    '예산 표에 간식비 5만 원 추가하고 합계 고쳐줘'\n"
-           "    [자료 첨부]로 공문을 붙이고 '이 공문 내용을 반영해줘'")
+           "    [자료 첨부]로 공문을 붙이고 '이 공문 내용을 반영해줘'\n"
+           "    '최신 교육부 지침을 찾아서 추진 근거에 넣어줘' (웹 검색)\n"
+           "    '수업에 쓸 만한 관련 영상 링크 찾아줘'")
+_URL = re.compile(r"(https?://[^\s)\]>\"']+)")
+
+
+def with_sources(text: str, sources: list) -> str:
+    """AI 답 아래에 웹 검색 출처·찾은 자료 링크를 붙인다."""
+    if not sources:
+        return text
+    return text + "\n\n참고한 자료 · 찾은 링크\n" + "\n".join(f"· {t}\n  {u}" for t, u in sources)
 
 
 class ChatPanel:
@@ -70,7 +82,18 @@ class ChatPanel:
             log.insert("end", text + "\n", "sys")
         else:
             log.insert("end", ("나" if who == "me" else "AI") + "\n", ("who", who))
-            log.insert("end", text.strip() + "\n", who)
+            # 웹 주소는 눌러서 열 수 있게
+            for i, part in enumerate(_URL.split(text.strip())):
+                if i % 2:
+                    tag = f"url{log.index('end')}"
+                    log.tag_configure(tag, foreground=ACCENT, underline=True)
+                    log.tag_bind(tag, "<Button-1>", lambda e, u=part: webbrowser.open(u))
+                    log.tag_bind(tag, "<Enter>", lambda e: log.configure(cursor="hand2"))
+                    log.tag_bind(tag, "<Leave>", lambda e: log.configure(cursor="arrow"))
+                    log.insert("end", part, (who, tag))
+                else:
+                    log.insert("end", part, who)
+            log.insert("end", "\n", who)
         log.configure(state="disabled")
         log.see("end")
         if record and self.app.session is not None:
@@ -192,9 +215,11 @@ class ChatPanel:
                 job.status("한글 화면 읽는 중…")
                 page_info = app.page_info(src)
             res = edit_document(job, src, out, text, history, ai, page_info=page_info, refs=refs)
-            # 결과 확인: 고친 문서를 한글로 다시 열어 쪽 수를 센다
-            if page_info and page_info[1] and res.changed:
-                job.status("결과 확인 중…")
+            # 쪽 수를 줄여 달라는 요청일 때만: 고친 문서를 한글로 다시 열어 쪽 수를 센다
+            # (그 밖에는 기다릴 이유가 없고, '결과 확인 중…'이 왜 뜨는지 알 수 없어 헷갈린다)
+            about_pages = any(w in text for w in ("쪽", "페이지", "장으로", "장 이내", "분량"))
+            if page_info and page_info[1] and res.changed and about_pages:
+                job.status("고친 문서의 쪽 수를 세는 중…")
                 _, after = app.page_info(out)
                 if after:
                     res.pages = (page_info[1].get("pages"), after.get("pages"))
@@ -216,6 +241,7 @@ class ChatPanel:
     def _on_edited(self, out: str, src: str, res):
         app = self.app
         reply = res.reply or ("수정했습니다." if res.changed else "바꿀 부분을 찾지 못했습니다.")
+        reply = with_sources(reply, res.sources)
         self.history.append(("ai", reply))
         self.add("ai", reply)
         if res.warning:

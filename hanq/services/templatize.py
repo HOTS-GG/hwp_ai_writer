@@ -1,5 +1,5 @@
 """완성 문서(작년 계획서 등)를 해마다 바뀌는 부분만 ○○○○로 바꾼 재사용 양식으로 만든다."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..ai import AIConfig
 from ..ai.prompts import TEMPLATIZE_SYSTEM
@@ -24,6 +24,7 @@ def templatize(job: Job, path: str, out_path: str, ai: AIConfig) -> TemplatizeRe
             "해마다 바뀌는 정보만 ○로 바꾼 줄과 표를 JSON으로 출력하세요.")
     job.status("AI가 바뀌는 부분을 찾아 빈칸으로 바꾸는 중…")
     streamer = LineStreamer(editor, job)
+    ai = replace(ai, web_search=False)   # 빈칸으로 바꾸는 일이라 검색할 것이 없다
     data = ask_json(ai, TEMPLATIZE_SYSTEM, user, job, on_text=streamer.on_text, label="양식으로 만드는 중")
     if not ai.streams:
         streamer.replay(data, seconds=2.0)
