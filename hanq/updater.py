@@ -102,35 +102,56 @@ def _clean_notes(body: str) -> str:
     return ""
 
 
-def download(rel: Release, on_progress=None, stop=None) -> Path:
-    """설치 파일을 받아 크기·SHA-256을 확인한 뒤 경로를 돌려준다."""
+def download(rel: Release, on_progress=None, stop=None, tries: int = 4) -> Path:
+    """설치 파일을 받아 크기·SHA-256을 확인한 뒤 경로를 돌려준다.
+    받다가 끊기면 처음부터가 아니라 끊긴 곳부터 이어 받는다 (느린 학교망)."""
     if not rel.asset_url:
         raise UpdateError("이 컴퓨터용 설치 파일이 릴리스에 없습니다.")
     dest_dir = CACHE_DIR / "update"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / rel.asset_name
     part = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(rel.asset_url, headers={"User-Agent": USER_AGENT})
     h = hashlib.sha256()
     done = 0
+    last_err = "연결이 중간에 끊겼습니다"
     try:
-        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
-            total = int(r.headers.get("Content-Length") or rel.asset_size or 0)
-            while True:
-                if stop is not None and stop.is_set():
-                    raise UpdateError("내려받기를 취소했습니다.")
-                chunk = r.read(256 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                h.update(chunk)
-                done += len(chunk)
-                if on_progress:
-                    on_progress(done, total)
+        with open(part, "wb") as f:
+            for _ in range(max(tries, 1)):
+                headers = {"User-Agent": USER_AGENT}
+                if done:
+                    headers["Range"] = f"bytes={done}-"
+                try:
+                    req = urllib.request.Request(rel.asset_url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        if done and getattr(r, "status", 200) != 206:
+                            # 서버가 이어 받기를 받아 주지 않았다: 처음부터 다시
+                            f.seek(0)
+                            f.truncate()
+                            h, done = hashlib.sha256(), 0
+                        total = rel.asset_size or done + int(r.headers.get("Content-Length") or 0)
+                        while True:
+                            if stop is not None and stop.is_set():
+                                raise UpdateError("내려받기를 취소했습니다.")
+                            chunk = r.read(256 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            h.update(chunk)
+                            done += len(chunk)
+                            if on_progress:
+                                on_progress(done, total)
+                    if not rel.asset_size or done >= rel.asset_size:
+                        break
+                except UpdateError:
+                    raise
+                except Exception as e:   # 끊김·시간 초과: 받은 곳부터 다시 시도
+                    last_err = e
+            else:
+                raise UpdateError(f"내려받기 실패: {last_err}")
     except UpdateError:
         part.unlink(missing_ok=True)
         raise
-    except Exception as e:
+    except OSError as e:
         part.unlink(missing_ok=True)
         raise UpdateError(f"내려받기 실패: {e}")
     if rel.asset_size and done != rel.asset_size:
@@ -147,7 +168,39 @@ def install_dir() -> Path:
     return Path(sys.executable).resolve().parent
 
 
-def launch_installer(setup: Path) -> None:
+UPDATE_LOG = Path(tempfile.gettempdir()) / "hanq_update.log"
+
+# 배치 파일에는 영문만 쓰고 경로는 환경 변수로 넘긴다. 창 없이 도는 cmd는 배치 파일 속 한글 경로를 깨뜨려 읽어,
+# 윈도우 사용자 이름이 한글인 컴퓨터에서는 설치가 시작되지도 않고 한큐만 꺼졌다.
+# 한큐가 완전히 꺼질 때까지 기다린 뒤(최대 20초쯤) 설치하고, 조용한 설치 뒤에 한큐가 없으면 설치 창을 띄운다.
+_UPDATE_BAT = (
+    "@echo off",
+    "set n=0",
+    ":wait",
+    "ping -n 2 127.0.0.1 >nul",
+    # 실행 중인 exe는 쓰기로 열 수 없다 (빈 글을 덧붙여 보는 것이라 파일은 바뀌지 않음).
+    # 창 없는 cmd에서는 '|'로 잇는 명령이 멈춰 버려서 tasklist | find 는 쓰지 않는다
+    'if not exist "%HANQ_EXE%" goto run',
+    '(type nul >> "%HANQ_EXE%") 2>nul && goto run',
+    "set /a n+=1",
+    "if %n% lss 20 goto wait",
+    ":run",
+    'echo start %date% %time% > "%HANQ_LOG%"',
+    'start "" /wait "%HANQ_SETUP%" /S /D=%HANQ_DIR%',
+    'echo installer exit %errorlevel% >> "%HANQ_LOG%"',
+    'if exist "%HANQ_EXE%" goto ok',
+    'echo failed: exe missing >> "%HANQ_LOG%"',
+    'start "" "%HANQ_SETUP%"',
+    "goto end",
+    ":ok",
+    'echo ok >> "%HANQ_LOG%"',
+    'start "" "%HANQ_EXE%"',
+    ":end",
+    'del "%~f0"',
+)
+
+
+def launch_installer(setup: Path, target: Path | None = None) -> None:
     """윈도우: 한큐가 닫힌 뒤 설치 파일을 조용히 실행하고 새 한큐를 띄우는 배치를 따로 돌린다.
     맥: dmg를 열어 준다(Applications로 끌어다 놓기)."""
     if IS_MAC:
@@ -155,19 +208,22 @@ def launch_installer(setup: Path) -> None:
         return
     if not IS_WIN:
         raise UpdateError("이 운영체제에서는 자동 설치를 지원하지 않습니다.")
-    target = install_dir()
-    exe = target / "HanQ.exe"
+    target = target or install_dir()
     bat = Path(tempfile.gettempdir()) / "hanq_update.cmd"
+    bat.write_bytes(("\r\n".join(_UPDATE_BAT) + "\r\n").encode("ascii"))
+    UPDATE_LOG.unlink(missing_ok=True)
     # NSIS의 /D=는 맨 끝에 따옴표 없이 써야 한다 (공백이 있어도 됨)
-    bat.write_text(
-        "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
-        "timeout /t 2 /nobreak >nul\r\n"
-        f"start \"\" /wait \"{setup}\" /S /D={target}\r\n"
-        f"if exist \"{exe}\" start \"\" \"{exe}\"\r\n"
-        "del \"%~f0\"\r\n",
-        encoding="utf-8")
+    env = {**os.environ, "HANQ_SETUP": str(setup), "HANQ_DIR": str(target), "HANQ_EXE": str(target / "HanQ.exe"),
+           "HANQ_LOG": str(UPDATE_LOG)}
     flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
              | getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=flags, close_fds=True,
+    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=flags, close_fds=True, env=env,
                      cwd=os.environ.get("TEMP") or None)
+
+
+def read_update_log() -> str:
+    """지난 자동 업데이트의 기록 (실패 안내용)."""
+    try:
+        return UPDATE_LOG.read_text(encoding="utf-8", errors="replace").strip()[:400]
+    except OSError:
+        return ""

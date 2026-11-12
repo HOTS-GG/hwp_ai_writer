@@ -18,8 +18,32 @@ class Updater:
         self._checking = False
 
     def check_on_start(self):
+        if self._last_update_failed():
+            return
         if self.app.s.get("auto_update_check", True):
             self.app.after(4000, lambda: self.check(silent=True))
+
+    def _last_update_failed(self) -> bool:
+        """지난번 자동 업데이트 뒤에도 버전이 그대로면(백신·권한 등으로 설치가 안 됨) 직접 설치하도록 안내한다."""
+        want = self.app.s.get("update_pending")
+        if not want:
+            return False
+        self.app.set("update_pending", "")
+        if not updater.is_newer(want):
+            return False
+
+        def tell():
+            log = updater.read_update_log()
+            msg = (f"한큐 {want} 자동 업데이트가 끝나지 않았습니다.\n"
+                   "백신 프로그램이 설치 파일을 막았거나, 한큐가 완전히 꺼지지 않았을 수 있습니다.\n\n"
+                   "내려받기 페이지를 열어 설치 파일을 직접 받아 실행하시겠습니까?\n"
+                   "(설정과 내 양식은 그대로 남습니다.)")
+            if log:
+                msg += f"\n\n기록: {log}"
+            if messagebox.askyesno("업데이트가 되지 않았습니다", msg, parent=self.app):
+                webbrowser.open(updater.RELEASES_PAGE)
+        self.app.after(1500, tell)
+        return True
 
     def check(self, silent: bool = False, on_result=None):
         """silent=True면 새 버전이 있을 때만 창을 띄운다."""
@@ -164,6 +188,8 @@ class UpdateDialog(tk.Toplevel):
         if IS_MAC:
             self.destroy()
             return
+        # 다음에 켰을 때 버전이 그대로면 설치가 안 된 것이므로 안내한다
+        self.app.set("update_pending", self.rel.version)
         # 설치 프로그램이 한큐 폴더를 덮어써야 하므로 닫는다 (설치가 끝나면 새 한큐가 다시 열린다)
         self.app.after(300, lambda: self.app._on_close(force=True))
 

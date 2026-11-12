@@ -83,9 +83,10 @@ FunctionEnd
 
 Section "한큐 (필수)" SecMain
   SectionIn RO
-  ; 실행 중인 한큐가 있으면 파일을 지울 수 없으므로 먼저 닫는다
+  ; 실행 중인 한큐가 있으면 파일을 지울 수 없으므로 먼저 닫는다 (미리보기용 rhwp도 같은 폴더에서 돈다)
   nsExec::Exec 'taskkill /IM ${APPEXE} /F'
-  Sleep 500
+  nsExec::Exec 'taskkill /IM rhwp.exe /F'
+  Sleep 1500
   Call RemoveOldInstall
   SetOutPath "$INSTDIR"
   File /r "..\dist\HanQ\*"

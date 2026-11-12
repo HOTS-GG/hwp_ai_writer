@@ -1,10 +1,12 @@
 """대화로 문서 고치기. 고친 줄은 받는 대로 화면에 보이고, 끝나면 실제로 바뀐 게 있는지 확인한다."""
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..ai import AIConfig
 from ..ai.prompts import EDIT_SYSTEM
 from ..doc import Editor, EditPlan, HwpxDocument, Outline
 from ..doc.editor import ApplyReport
+from ..doc.objects import IMAGE_EXTS
 from .context import read_references
 from .job import Job
 from .stream import LineStreamer, ask_json, sources_of
@@ -26,7 +28,10 @@ def edit_document(job: Job, path: str, out_path: str, instruction: str, history:
     pinfo = pinfo or {}
     doc = HwpxDocument(path)
     outline = Outline(doc, edit=True, page_map=pinfo.get("paras"), page_count=pinfo.get("pages"))
-    editor = Editor(doc, outline)
+    # 붙인 파일 중 그림은 문서에 넣을 재료(inserts의 image), 나머지는 읽을 참고 자료
+    pics = {Path(r).name: r for r in refs or [] if Path(r).suffix.lower() in IMAGE_EXTS}
+    refs = [r for r in refs or [] if r not in pics.values()]
+    editor = Editor(doc, outline, images=pics)
     before = doc.snapshot()
     images = pages[: ai.max_images] if ai.send_images else []
     hist = "\n".join(f"{'사용자' if who == 'user' else 'AI'}: {msg}" for who, msg in history[-8:])
@@ -34,6 +39,7 @@ def edit_document(job: Job, path: str, out_path: str, instruction: str, history:
     user = (f"## 현재 문서 구조\n{outline.text}\n\n"
             f"## 이 문서의 줄 기호 (새 장을 만들 때 이 체계를 따름)\n{' / '.join(editor.body_markers())}\n\n"
             + ref_text
+            + (f"## 붙인 그림 파일 (inserts의 image에 이 이름을 씀)\n{' / '.join(pics)}\n\n" if pics else "")
             + (f"## 지금까지의 대화\n{hist}\n\n" if hist else "")
             + f"## 이번 수정 요청\n{instruction}\n\n바뀐 부분만 담은 JSON을 출력하세요.")
     job.status("AI가 수정 중…" + (f" (화면 {len(images)}쪽 첨부)" if images else ""))

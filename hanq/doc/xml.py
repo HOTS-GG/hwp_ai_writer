@@ -22,6 +22,10 @@ def hh(name: str) -> str:
     return f"{{{HH}}}{name}"
 
 
+def hc(name: str) -> str:
+    return f"{{{HC}}}{name}"
+
+
 P, RUN, T, TBL, TR, TC = (hp(n) for n in ("p", "run", "t", "tbl", "tr", "tc"))
 SUBLIST, CELLADDR, CELLSPAN, CELLSZ, SZ = (hp(n) for n in ("subList", "cellAddr", "cellSpan", "cellSz", "sz"))
 LINESEG, PIC, SECPR, DRAWTEXT = hp("linesegarray"), hp("pic"), hp("secPr"), hp("drawText")
@@ -281,6 +285,35 @@ def is_simple_table_para(p) -> bool:
         if span.get("rowSpan") != "1" or span.get("colSpan") != "1":
             return False
     return tbl.find(f".//{TR}//{TBL}") is None
+
+
+_PLAIN_CELL = ('<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="{bf}">'
+               '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" '
+               'linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+               '<hp:p id="0" paraPrIDRef="{pp}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+               '<hp:run charPrIDRef="{cp}"><hp:t></hp:t></hp:run></hp:p></hp:subList>'
+               '<hp:cellAddr colAddr="{c}" rowAddr="{r}"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
+               '<hp:cellSz width="{w}" height="1700"/><hp:cellMargin left="510" right="510" top="141" bottom="141"/>'
+               '</hp:tc>')
+
+
+def plain_table_paragraph(border_id: str, width: int, char_id: str = "0", para_id: str = "0"):
+    """본뜰 표가 하나도 없는 문서(공문 등)에 새 표를 넣을 때 쓰는 2행 2열 기본 표 문단.
+    build_table_paragraph()가 이것을 본떠 원하는 열·행 수로 만든다."""
+    def cell(r, c):
+        return _PLAIN_CELL.format(bf=border_id, pp=para_id, cp=char_id, c=c, r=r, w=width // 2)
+    rows = "".join(f"<hp:tr>{cell(r, 0)}{cell(r, 1)}</hp:tr>" for r in range(2))
+    xml = (f'<hp:p xmlns:hp="{HP}" id="0" paraPrIDRef="{para_id}" styleIDRef="0" pageBreak="0" columnBreak="0" '
+           f'merged="0"><hp:run charPrIDRef="{char_id}"><hp:tbl id="{new_id()}" zOrder="0" numberingType="TABLE" '
+           'textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" '
+           f'repeatHeader="1" rowCnt="2" colCnt="2" cellSpacing="0" borderFillIDRef="{border_id}" noAdjust="0">'
+           f'<hp:sz width="{width}" widthRelTo="ABSOLUTE" height="3400" heightRelTo="ABSOLUTE" protect="0"/>'
+           '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" '
+           'vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+           '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+           '<hp:inMargin left="510" right="510" top="141" bottom="141"/>'
+           f'{rows}</hp:tbl></hp:run></hp:p>')
+    return etree.fromstring(xml)
 
 
 def build_table_paragraph(proto_p, columns: list, rows: list, width: int | None = None):

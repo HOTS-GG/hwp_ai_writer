@@ -8,6 +8,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from ..config import CACHE_DIR
+from ..doc.objects import IMAGE_EXTS
 from ..readers import FILE_TYPES as REF_TYPES
 from .theme import ACCENT, BORDER, CARD, FONT, FONT_B, FONT_SM, INPUT_BG, MUTED, TEXT, button, card, restyle
 
@@ -17,8 +18,29 @@ WELCOME = ("문서를 생성하거나 [파일 열기]로 HWPX·HWP 문서를 불
            "    '예산 표에 간식비 5만 원 추가하고 합계 고쳐줘'\n"
            "    [자료 첨부]로 공문을 붙이고 '이 공문 내용을 반영해줘'\n"
            "    '최신 교육부 지침을 찾아서 추진 근거에 넣어줘' (웹 검색)\n"
-           "    '수업에 쓸 만한 관련 영상 링크 찾아줘'")
-_URL = re.compile(r"(https?://[^\s)\]>\"']+)")
+           "    '수업에 쓸 만한 관련 영상 링크 찾아줘'\n"
+           "    '줄 간격을 150%로, 글꼴을 맑은 고딕으로 바꿔줘' / '쪽 번호를 아래 가운데에 넣어줘'\n"
+           "    '일정 표의 첫 행 두 칸을 합쳐줘' / '참가 인원 표를 막대 그래프로 넣어줘'\n"
+           "    [자료 첨부]로 사진을 붙이고 '이 사진을 2장 아래에 넣어줘'")
+# 주소에 쓸 수 있는 영문·기호만 (바로 뒤에 붙은 '을/를' 같은 한글 조사는 주소가 아니다)
+_URL = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+_PAGE_WORDS = re.compile(r"(?<![른왼래위앞뒤양옆안깥이그저])쪽|페이지|장으로 줄|장 이내|분량")
+
+
+def split_urls(text: str) -> list[tuple[str, bool]]:
+    """글을 (조각, 주소인지)로 나눈다. 주소 끝에 붙은 마침표·쉼표·닫는 괄호는 주소에서 뺀다."""
+    out, pos = [], 0
+    for m in _URL.finditer(text):
+        url = m.group().rstrip(".,;:!?'\"")
+        while url.endswith((")", "]")) and url.count("(") + url.count("[") < url.count(")") + url.count("]"):
+            url = url[:-1].rstrip(".,;:!?'\"")
+        if len(url) <= len("https://"):
+            continue
+        out.append((text[pos:m.start()], False))
+        out.append((url, True))
+        pos = m.start() + len(url)
+    out.append((text[pos:], False))
+    return [(s, u) for s, u in out if s]
 
 
 def with_sources(text: str, sources: list) -> str:
@@ -34,6 +56,7 @@ class ChatPanel:
         self.gen = gen_tab
         self.history: list[tuple[str, str]] = []
         self.attached: list[str] = []
+        self._links = 0   # 링크마다 다른 이름표 (같은 줄의 링크가 서로 섞이지 않게)
 
         c = card(parent)
         c.pack(fill="both", expand=True)
@@ -83,9 +106,10 @@ class ChatPanel:
         else:
             log.insert("end", ("나" if who == "me" else "AI") + "\n", ("who", who))
             # 웹 주소는 눌러서 열 수 있게
-            for i, part in enumerate(_URL.split(text.strip())):
-                if i % 2:
-                    tag = f"url{log.index('end')}"
+            for part, is_url in split_urls(text.strip()):
+                if is_url:
+                    self._links += 1
+                    tag = f"url{self._links}"
                     log.tag_configure(tag, foreground=ACCENT, underline=True)
                     log.tag_bind(tag, "<Button-1>", lambda e, u=part: webbrowser.open(u))
                     log.tag_bind(tag, "<Enter>", lambda e: log.configure(cursor="hand2"))
@@ -178,7 +202,8 @@ class ChatPanel:
         self.app.preview_file(self.gen.preview, str(work))
 
     def _attach(self):
-        for p in filedialog.askopenfilenames(title="반영할 자료 첨부", filetypes=REF_TYPES):
+        types = [REF_TYPES[0], ("문서에 넣을 그림", " ".join(f"*{e}" for e in IMAGE_EXTS)), *REF_TYPES[1:]]
+        for p in filedialog.askopenfilenames(title="반영할 자료·넣을 그림 첨부", filetypes=types):
             if p not in self.attached:
                 self.attached.append(p)
         self._attach_var.set("📎 " + ", ".join(Path(p).name for p in self.attached) if self.attached else "")
@@ -217,7 +242,7 @@ class ChatPanel:
             res = edit_document(job, src, out, text, history, ai, page_info=page_info, refs=refs)
             # 쪽 수를 줄여 달라는 요청일 때만: 고친 문서를 한글로 다시 열어 쪽 수를 센다
             # (그 밖에는 기다릴 이유가 없고, '결과 확인 중…'이 왜 뜨는지 알 수 없어 헷갈린다)
-            about_pages = any(w in text for w in ("쪽", "페이지", "장으로", "장 이내", "분량"))
+            about_pages = bool(_PAGE_WORDS.search(text))
             if page_info and page_info[1] and res.changed and about_pages:
                 job.status("고친 문서의 쪽 수를 세는 중…")
                 _, after = app.page_info(out)

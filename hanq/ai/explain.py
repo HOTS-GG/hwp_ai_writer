@@ -25,6 +25,9 @@ _RULES = [
      "구독 계정 로그인이 풀렸어요.", "[다시 설정하기]를 누르면 로그인 창이 열립니다. 로그인만 다시 하면 됩니다.", "login"),
     (r"찾을 수 없습니다|실행할 수 없습니다|not recognized|No such file",
      "Claude Code/Codex 프로그램을 찾지 못했어요.", "[다시 설정하기]를 누르면 설치와 로그인을 자동으로 다시 합니다.", "login"),
+    (r"exceeded your current quota|RESOURCE_EXHAUSTED",
+     "AI 사용 한도를 다 썼어요.", "무료 키는 잠시(1분~하루) 기다리면 다시 풀립니다. 돈을 내고 쓰는 키라면 키를 받은 사이트에서 "
+     "결제 정보와 남은 금액을 확인해 주세요.", ""),
     (r"credit balance|insufficient_quota|billing|quota|결제|payment required|\[402\]",
      "AI 사용 금액(크레딧)이 모자라요.", "키를 받은 사이트에서 결제 정보나 남은 금액을 확인해 주세요. 구독 계정으로 바꿔 쓰는 방법도 있어요.", "connect"),
     (r"\[429\]|rate.?limit|too many requests|usage limit|limit reached|RESOURCE_EXHAUSTED",

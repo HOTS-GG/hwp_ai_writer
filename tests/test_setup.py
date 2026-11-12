@@ -61,6 +61,50 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(updater.UpdateError):
                 updater.download(rel)
 
+    def test_download_resumes_after_drop(self):
+        """받다가 끊기면 끊긴 곳부터 이어 받는다 (처음부터 다시 받지 않음)."""
+        payload, ranges = self.payload, []
+
+        class Resp:
+            def __init__(self, start, cut):
+                self.status = 206 if start else 200
+                self.headers = {"Content-Length": str(len(payload) - start)}
+                self._data, self._cut = payload[start:], cut
+
+            def read(self, n):
+                if self._cut is not None and self._cut <= 0:
+                    raise TimeoutError("timed out")
+                chunk, self._data = self._data[:1000], self._data[1000:]
+                if self._cut is not None:
+                    self._cut -= len(chunk)
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, timeout=0):
+            rng = req.get_header("Range")
+            ranges.append(rng)
+            start = int(rng.split("=")[1].rstrip("-")) if rng else 0
+            return Resp(start, 3000 if not rng else None)   # 첫 연결은 3000바이트 뒤 끊김
+
+        with mock.patch.object(updater, "_get_json", return_value=self._api()), \
+                mock.patch.object(updater, "CACHE_DIR", Path(self.tmp.name) / "cache"), \
+                mock.patch.object(updater.urllib.request, "urlopen", fake_open):
+            path = updater.download(updater.check())
+        self.assertEqual(path.read_bytes(), payload)
+        self.assertEqual(ranges, [None, "bytes=3000-"])
+
+    def test_update_batch_is_ascii(self):
+        """배치 파일에 경로(한글 사용자 이름)를 직접 쓰지 않는다 — 창 없는 cmd가 한글을 깨뜨려 읽는다."""
+        text = "\n".join(updater._UPDATE_BAT)
+        text.encode("ascii")
+        self.assertIn('"%HANQ_SETUP%" /S /D=%HANQ_DIR%', text)
+        self.assertNotIn("|", text)   # 창 없는 cmd에서 '|'는 멈춘다
+
 
 class SecurityAutoFindTest(unittest.TestCase):
     def setUp(self):

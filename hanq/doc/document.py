@@ -6,7 +6,17 @@ import zipfile
 
 from lxml import etree
 
-from .xml import ALIGNS, P, RUN, SUBLIST, T, TBL, TC, TR, cell_text, hex_color, hh, para_text
+from .xml import (ALIGNS, HWPUNIT_PER_MM, P, RUN, SUBLIST, T, TBL, TC, TR, cell_text, hc, hex_color, hh, hp,
+                  para_text)
+
+
+def _num(v) -> float | None:
+    """AI가 준 숫자 ('12', '12pt', 12.5). 숫자가 아니면 None."""
+    if isinstance(v, bool) or v is None:
+        return None
+    m = re.match(r"\s*(-?\d+(?:\.\d+)?)", str(v))
+    return float(m.group(1)) if m else None
+
 
 HEADER_NAME = "Contents/header.xml"
 SECTION_RE = re.compile(r"^Contents/section\d+\.xml$")
@@ -165,15 +175,62 @@ class HwpxDocument:
                 flag("italic", bool(style["italic"]))
             if "underline" in style:
                 ul = cp.find(hh("underline"))
+                if ul is None and style["underline"]:
+                    ul = etree.Element(hh("underline"), shape="SOLID", color="#000000")
+                    anchor = cp.find(hh("strikeout"))
+                    anchor.addprevious(ul) if anchor is not None else cp.append(ul)
                 if ul is not None:
                     ul.set("type", "BOTTOM" if style["underline"] else "NONE")
                     if style.get("color"):
                         ul.set("color", hex_color(style["color"]))
+            if "strike" in style:   # 취소선
+                so = cp.find(hh("strikeout"))
+                if so is None:
+                    so = etree.Element(hh("strikeout"), color="#000000")
+                    anchor = cp.find(hh("outline"))
+                    anchor.addprevious(so) if anchor is not None else cp.append(so)
+                so.set("shape", "SOLID" if style["strike"] else "NONE")
+            for key_, tag in (("superscript", "supscript"), ("subscript", "subscript")):   # 위 첨자·아래 첨자
+                if key_ in style:
+                    for other in ("supscript", "subscript"):   # 둘은 함께 쓸 수 없다
+                        el = cp.find(hh(other))
+                        if el is not None:
+                            cp.remove(el)
+                    if style[key_]:
+                        cp.append(etree.Element(hh(tag)))
+            # 자간(spacing, -50~50%)·장평(ratio, 50~200%): 한글·영문 등 모든 글자 종류에 같이 적용
+            for key_, tag, lo, hi in (("spacing", "spacing", -50, 50), ("ratio", "ratio", 50, 200)):
+                v = _num(style.get(key_))
+                el = cp.find(hh(tag))
+                if v is not None and el is not None:
+                    for lang in el.attrib:
+                        el.set(lang, str(int(max(lo, min(hi, v)))))
+            if style.get("font"):
+                ref = cp.find(hh("fontRef"))
+                if ref is not None:
+                    for lang in list(ref.attrib):
+                        ref.set(lang, self.font_id(lang, str(style["font"]).strip()))
         key = tuple(sorted((k, str(v)) for k, v in style.items()))
         return self._variant("charProperties", "charPr", base_id, key, change)
 
+    def font_id(self, lang: str, face: str) -> str:
+        """글꼴 이름의 id (글자 종류 lang: hangul·latin …). 문서 글꼴 목록에 없으면 목록에 더한다."""
+        ff = next((f for f in self.header_root().iter(hh("fontface")) if f.get("lang", "").lower() == lang.lower()),
+                  None)
+        if ff is None:
+            return "0"
+        fonts = ff.findall(hh("font"))
+        for f in fonts:
+            if f.get("face") == face:
+                return f.get("id")
+        new = etree.SubElement(ff, hh("font"), id=str(max((int(f.get("id")) for f in fonts), default=-1) + 1),
+                               face=face, type="TTF", isEmbedded="0")
+        ff.set("fontCnt", str(len(fonts) + 1))
+        return new.get("id")
+
     def parapr_variant(self, base_id: str, para: dict) -> str:
-        """문단 모양을 복제해 정렬(align)·줄 간격(line_spacing %)만 바꾼 id."""
+        """문단 모양을 복제해 정렬(align), 줄 간격(line_spacing %), 문단 위·아래 간격(space_before/after pt),
+        왼쪽·오른쪽 여백(left_margin/right_margin pt), 첫 줄 들여쓰기(indent pt, 음수면 내어쓰기)만 바꾼 id."""
         def change(pp):
             align = str(para.get("align", "")).strip().lower()
             if align in ALIGNS:
@@ -186,8 +243,155 @@ class HwpxDocument:
                 for ls in pp.iter(hh("lineSpacing")):
                     ls.set("type", "PERCENT")
                     ls.set("value", str(int(float(para["line_spacing"]))))
+            for key_, tag in (("space_before", "prev"), ("space_after", "next"), ("left_margin", "left"),
+                              ("right_margin", "right"), ("indent", "intent")):
+                v = _num(para.get(key_))
+                if v is None:
+                    continue
+                for m in pp.iter(hh("margin")):
+                    el = m.find(hc(tag))
+                    if el is None:
+                        el = etree.SubElement(m, hc(tag), unit="HWPUNIT")
+                    # 새 형식(hp:case) 안의 값은 1pt=100, 그 밖(예전 형식과 호환용 hp:default)은 1pt=200
+                    scale = 100 if m.getparent().tag == hp("case") else 200
+                    el.set("value", str(int(v * scale)))
+            if "keep_with_next" in para:
+                for bs in pp.iter(hh("breakSetting")):
+                    bs.set("keepWithNext", "1" if para["keep_with_next"] else "0")
         key = tuple(sorted((k, str(v)) for k, v in para.items()))
         return self._variant("paraProperties", "paraPr", base_id, key, change)
+
+    def cellfill_variant(self, base_id: str, color) -> str:
+        """테두리 모양을 복제해 칸 배경색만 바꾼 id (color가 비거나 'none'이면 배경색 없앰)."""
+        face = "none" if not color or str(color).strip().lower() in ("none", "없음") else hex_color(color)
+
+        def change(bf):
+            fb = bf.find(hc("fillBrush"))
+            if fb is None:
+                fb = etree.SubElement(bf, hc("fillBrush"))
+            wb = fb.find(hc("winBrush"))
+            if wb is None:
+                for c in list(fb):
+                    fb.remove(c)
+                wb = etree.SubElement(fb, hc("winBrush"), hatchColor="#999999", alpha="0")
+            wb.set("faceColor", face)
+        return self._variant("borderFills", "borderFill", base_id, ("fill", face), change)
+
+    def set_page(self, page: dict) -> list[str]:
+        """용지·쪽 설정을 바꾸고, 반영하지 못한 항목 이름을 돌려준다.
+        여백(mm) margin_top/bottom/left/right/header/footer, 방향 orientation(landscape|portrait),
+        다단 columns(1~4)·column_gap(mm), 쪽 번호 page_number(위치|none), 머리말 header·꼬리말 footer(글, ""면 지움)."""
+        from . import objects as ob
+        missed = []
+        for root in self.ordered_sections():
+            for margin in root.iter(hp("margin")):
+                if margin.getparent().tag != hp("pagePr"):
+                    continue
+                for side in ("top", "bottom", "left", "right", "header", "footer"):
+                    v = _num(page.get(f"margin_{side}"))
+                    if v is not None and 0 <= v <= 100:
+                        margin.set(side, str(int(v * HWPUNIT_PER_MM)))
+        first = self.ordered_sections()[0]
+        sec_run = next((r for r in first.iter(RUN) if r.find(hp("secPr")) is not None), None)
+
+        orient = str(page.get("orientation", "")).strip().lower()
+        if orient:
+            # 한글은 종이 크기를 그대로 두고 방향만 적는다: NARROWLY = 가로(넓게), WIDELY = 세로
+            want = {"landscape": "NARROWLY", "가로": "NARROWLY", "portrait": "WIDELY", "세로": "WIDELY"}.get(orient)
+            pages = [pp for root in self.ordered_sections() for pp in root.iter(hp("pagePr"))]
+            if want and pages:
+                for pp in pages:
+                    w, h = int(pp.get("width", "0")), int(pp.get("height", "0"))
+                    if w > h:   # 크기를 바꿔 가로로 만든 문서도 같은 규칙으로 맞춘다
+                        pp.set("width", str(h))
+                        pp.set("height", str(w))
+                    pp.set("landscape", want)
+            else:
+                missed.append("용지 방향")
+
+        cols = _num(page.get("columns"))
+        if cols is not None:
+            col = next(first.iter(hp("colPr")), None)
+            if col is not None and 1 <= cols <= 4:
+                col.set("colCount", str(int(cols)))
+                gap = _num(page.get("column_gap"))
+                col.set("sameGap", str(int((gap if gap is not None else 8) * HWPUNIT_PER_MM) if cols > 1 else 0))
+            else:
+                missed.append("다단")
+
+        if "page_number" in page:
+            pos = str(page.get("page_number") or "none").strip().lower()
+            old = [c for c in first.iter(hp("ctrl")) if c.find(hp("pageNum")) is not None]
+            if pos in ("none", "없음", "false"):
+                for c in old:
+                    c.getparent().remove(c)
+            elif pos in ob.PAGE_NUM_POS and (old or sec_run is not None):
+                if old:
+                    old[0].find(hp("pageNum")).set("pos", ob.PAGE_NUM_POS[pos])
+                else:
+                    sec_run.append(ob.page_num_ctrl(ob.PAGE_NUM_POS[pos]))
+            else:
+                missed.append("쪽 번호")
+
+        for kind, style in (("header", "머리말"), ("footer", "머리말")):
+            if kind not in page:
+                continue
+            for c in [c for root in self.ordered_sections() for c in root.iter(hp("ctrl"))
+                      if c.find(hp(kind)) is not None]:
+                c.getparent().remove(c)
+            text = str(page.get(kind) or "").strip()
+            if text and sec_run is not None:
+                sec_run.append(ob.header_ctrl(kind, text, self.text_width(), self.style_ids(style)))
+            elif text:
+                missed.append("머리말" if kind == "header" else "꼬리말")
+        return missed
+
+    def style_ids(self, name: str) -> tuple[str, str, str]:
+        """스타일 이름(머리말·각주 …)의 (문단 모양, 글자 모양, 스타일) id. 없으면 바탕글."""
+        for st in self.header_root().iter(hh("style")):
+            if st.get("name") == name:
+                return st.get("paraPrIDRef", "0"), st.get("charPrIDRef", "0"), st.get("id", "0")
+        return "0", "0", "0"
+
+    def add_image(self, data: bytes, ext: str) -> str:
+        """그림 파일을 문서 안에 넣고(BinData) 그 이름(image7 …)을 돌려준다."""
+        ext = ext.lower().lstrip(".")
+        ext = "jpg" if ext == "jpeg" else ext
+        hpf_i = next(k for k, (i, _) in enumerate(self._items) if i.filename == "Contents/content.hpf")
+        hpf = etree.fromstring(self._items[hpf_i][1], _PARSER)
+        manifest = next(e for e in hpf.iter() if etree.QName(e).localname == "manifest")
+        used = {e.get("id") for e in manifest}
+        n = 1
+        while f"image{n}" in used:
+            n += 1
+        name = f"image{n}"
+        item = etree.SubElement(manifest, manifest[0].tag, id=name, href=f"BinData/{name}.{ext}")
+        item.set("media-type", {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif",
+                                "bmp": "image/bmp"}.get(ext, "image/unknown"))
+        item.set("isEmbeded", "1")
+        self._items[hpf_i] = (self._items[hpf_i][0],
+                              etree.tostring(hpf, xml_declaration=True, encoding="UTF-8", standalone=True))
+        self._items.append((zipfile.ZipInfo(f"BinData/{name}.{ext}", date_time=self._items[hpf_i][0].date_time), data))
+        return name
+
+    def text_width(self) -> int:
+        """본문 폭(HWPUNIT) = 종이 폭 - 왼쪽·오른쪽 여백 (가로 용지면 긴 쪽이 폭). 알 수 없으면 A4 기본(150mm)."""
+        for root in self.ordered_sections():
+            page = root.find(f".//{hp('pagePr')}")
+            margin = page.find(hp("margin")) if page is not None else None
+            if margin is not None:
+                try:
+                    paper = int(page.get("height" if page.get("landscape") == "NARROWLY" else "width"))
+                    w = paper - int(margin.get("left")) - int(margin.get("right"))
+                    cols = next(root.iter(hp("colPr")), None)
+                    n = int(cols.get("colCount", "1")) if cols is not None else 1
+                    if n > 1:
+                        w = (w - int(cols.get("sameGap", "0")) * (n - 1)) // n
+                except (TypeError, ValueError):
+                    break
+                if w > 5000:
+                    return w
+        return 42520
 
     def borderfill_variant(self, base_id: str, on: bool) -> str:
         """테두리 모양을 복제해 네 변을 실선(on) 또는 없음으로 바꾼 id. 칸 배경색은 그대로."""

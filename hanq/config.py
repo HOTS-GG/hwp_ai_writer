@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 
 if sys.platform == "darwin":
     APP_DIR = Path.home() / "Library" / "Application Support" / "HWP_AI_Writer"
@@ -78,6 +78,7 @@ DEFAULTS = {
     "window_zoomed": False,
     "auto_update_check": True,
     "skip_version": "",
+    "update_pending": "",       # 자동 업데이트로 설치하려던 버전 (다음에 켰을 때 그대로면 실패 안내)
     "last_update_check": "",
     "auto_security_module": True,
     "session_keep_days": 7,

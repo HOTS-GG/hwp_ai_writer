@@ -5,19 +5,74 @@ AI 응답(JSON)은 EditPlan으로 정리한 뒤 apply()로 한 번에 반영한�
 실시간 화면에서는 fill_line()/fill_table()/type_line()을 받는 대로 하나씩 부른다.
 """
 import copy
+import io
+import os
 from dataclasses import dataclass, field
 
 from lxml import etree
 
 from .document import HwpxDocument
 from .outline import Outline, TableGroup
-from .xml import (CELLSZ, P, ROMAN, RUN, SUBLIST, T, TBL, TC, TEXT_PATH, TR, build_table_paragraph, cell_text, clone_line,
-                  drop_if_empty, has_objects, has_secpr, heading_parts, is_blank, is_simple_table_para, leading_ws,
-                  mark_changed, marker_of, new_id, para_text, renumber_table, set_cell, set_para_text, set_t, strip_lineseg,
-                  t_text, top_para)
+from .xml import (CELLADDR, CELLSPAN, CELLSZ, HWPUNIT_PER_MM, P, ROMAN, RUN, SUBLIST, SZ, T, TBL, TC, TEXT_PATH, TR,
+                  build_table_paragraph, cell_text, clone_line, drop_if_empty, has_objects, has_secpr, heading_parts,
+                  hex_color, hp,
+                  is_blank, is_simple_table_para, leading_ws, mark_changed, marker_of, new_id, para_text,
+                  plain_table_paragraph, renumber_table, set_cell, set_para_text, set_t, strip_lineseg, t_text, top_para)
 
-STYLE_KEYS = ("color", "background", "size", "bold", "italic", "underline")
-PARA_KEYS = ("align", "line_spacing")
+
+def as_lines(v) -> list[str]:
+    """AI가 준 줄 목록. 목록 대신 글 하나로 주면 줄바꿈으로 나눈다 (글자마다 한 줄이 되지 않게)."""
+    if isinstance(v, str):
+        return [ln for ln in v.split("\n") if ln.strip()]
+    if isinstance(v, (list, tuple)):
+        return [str(x) for x in v if x is not None and not isinstance(x, (dict, list))]
+    return []
+
+
+def _mm(v) -> int:
+    """mm로 준 크기를 HWPUNIT으로 (숫자가 아니면 0)."""
+    try:
+        return int(float(v) * HWPUNIT_PER_MM) if v is not None and float(v) > 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _span(tc) -> tuple[int, int, int, int]:
+    """칸의 (행, 열, 행 수, 열 수) — 0부터."""
+    addr, span = tc.find(CELLADDR), tc.find(CELLSPAN)
+    return (int(addr.get("rowAddr", "0")), int(addr.get("colAddr", "0")),
+            int(span.get("rowSpan", "1")) if span is not None else 1,
+            int(span.get("colSpan", "1")) if span is not None else 1)
+
+
+def _grid(tbl) -> dict:
+    """(행, 열) → 그 자리를 차지한 칸 (합쳐진 칸은 여러 자리에 나온다)."""
+    grid = {}
+    for tr in tbl.iterfind(TR):
+        for tc in tr.iterfind(TC):
+            if tc.find(CELLADDR) is None:
+                continue
+            r, c, rs, cs = _span(tc)
+            for i in range(rs):
+                for j in range(cs):
+                    grid[(r + i, c + j)] = tc
+    return grid
+
+
+def _table_spec(v) -> dict | None:
+    """{columns, rows}가 제대로 든 표 요청만."""
+    if not isinstance(v, dict) or not isinstance(v.get("columns"), list) or not v["columns"]:
+        return None
+    rows = v.get("rows") if isinstance(v.get("rows"), list) else []
+    return {"columns": [str(c) for c in v["columns"]], "rows": [r if isinstance(r, list) else [r] for r in rows]}
+
+
+INSERT_OBJECTS = ("table", "equation", "image", "textbox", "chart")   # inserts로 넣는 개체
+
+STYLE_KEYS = ("color", "background", "size", "bold", "italic", "underline", "strike", "superscript", "subscript",
+              "spacing", "ratio", "font")
+PARA_KEYS = ("align", "line_spacing", "space_before", "space_after", "left_margin", "right_margin", "indent",
+             "keep_with_next")
 
 
 @dataclass
@@ -32,6 +87,10 @@ class EditPlan:
     replace_all: list = field(default_factory=list)
     unwraps: list = field(default_factory=list)
     new_sections: list = field(default_factory=list)
+    page: dict = field(default_factory=dict)         # 용지 여백·방향·다단·쪽 번호·머리말·꼬리말
+    merges: list = field(default_factory=list)       # 칸 합치기
+    splits: list = field(default_factory=list)       # 합친 칸 나누기
+    footnotes: list = field(default_factory=list)
     dropped: list = field(default_factory=list)      # 문서에 없는 번호
 
     @classmethod
@@ -60,11 +119,16 @@ class EditPlan:
         plan.moves = [m for m in as_list("moves") if isinstance(m, dict)]
         plan.replace_all = [r for r in as_list("replace_all") if isinstance(r, dict)]
         plan.new_sections = [s for s in as_list("new_sections") if isinstance(s, dict)]
+        plan.page = as_dict("page")
+        plan.merges = [m for m in as_list("merges") if isinstance(m, dict)]
+        plan.splits = as_list("splits")
+        plan.footnotes = [f for f in as_list("footnotes") if isinstance(f, dict)]
         return plan
 
     def is_empty(self) -> bool:
         return not any((self.lines, self.tables, self.inserts, self.styles, self.deletes, self.moves,
-                        self.replace_all, self.unwraps, self.new_sections))
+                        self.replace_all, self.unwraps, self.new_sections, self.page, self.merges, self.splits,
+                        self.footnotes))
 
 
 @dataclass
@@ -78,18 +142,22 @@ class ApplyReport:
     replaced: int = 0
     unwrapped: int = 0
     sections: int = 0
+    page: int = 0
+    merged: int = 0
+    footnotes: int = 0
     missed: list = field(default_factory=list)       # 반영하지 못한 것 (사용자 안내용)
 
     @property
     def changed(self) -> int:
         return (self.lines + self.tables + self.inserted + self.styled + self.deleted + self.moved
-                + self.replaced + self.unwrapped + self.sections)
+                + self.replaced + self.unwrapped + self.sections + self.page + self.merged + self.footnotes)
 
 
 class Editor:
-    def __init__(self, doc: HwpxDocument, outline: Outline):
+    def __init__(self, doc: HwpxDocument, outline: Outline, images: dict | None = None):
         self.doc = doc
         self.outline = outline
+        self.images = images or {}              # 사용자가 붙인 그림 파일: 이름 → 경로 (inserts의 image)
         self._applied: dict[str, object] = {}   # 이미 반영한 줄·표 (같은 값을 두 번 넣지 않게)
         self._extra: dict[str, list] = {}       # 줄 값의 줄바꿈으로 이어 붙인 줄들
         self._protos_cache = None
@@ -186,6 +254,12 @@ class Editor:
         for tid, rows in plan.tables.items():
             self.fill_table(tid, rows)
             rep.tables += self._applied.get(tid) == rows
+        if plan.page:   # 용지를 먼저 바꿔야 새로 넣는 표·그림이 바뀐 본문 폭에 맞는다
+            old_width = self.doc.text_width()
+            missed = self.doc.set_page(plan.page)
+            rep.page = int(len(missed) < len(plan.page))
+            rep.missed += missed
+            self._refit(old_width, self.doc.text_width())
         rep.replaced = self.replace_everywhere(plan.replace_all)
         rep.inserted = self.insert_lines(plan.inserts)
         rep.styled = self.apply_styles(plan.styles)
@@ -193,18 +267,50 @@ class Editor:
         rep.unwrapped = self.unwrap_tables(plan.unwraps)
         rep.deleted = self.delete_blocks(plan.deletes)
         rep.sections = self.insert_sections(plan.new_sections)
+        rep.footnotes = self.add_footnotes(plan.footnotes)
+        rep.merged = self.merge_cells(plan.merges) + self.split_cells(plan.splits)
         if (rep.sections or rep.deleted or rep.moved) and sequential and self._all_headings():
             self._renumber_headings(start)
 
-        want_lines = sum(len(i.get("lines") or []) for i in plan.inserts)
+        want_lines = sum(len(as_lines(i.get("lines"))) + sum(i.get(k) is not None for k in INSERT_OBJECTS)
+                         for i in plan.inserts)
         for have, want, what in ((rep.inserted, want_lines, "끼워 넣을 줄"), (rep.styled, len(plan.styles), "모양 바꾸기"),
                                  (rep.sections, len(plan.new_sections), "새 장"), (rep.moved, len(plan.moves), "옮기기"),
-                                 (rep.deleted, len(plan.deletes), "지우기"), (rep.unwrapped, len(plan.unwraps), "표 틀 없애기")):
+                                 (rep.deleted, len(plan.deletes), "지우기"), (rep.unwrapped, len(plan.unwraps), "표 틀 없애기"),
+                                 (rep.footnotes, len(plan.footnotes), "각주"),
+                                 (rep.merged, len(plan.merges) + len(plan.splits), "칸 합치기·나누기")):
             if have < want:
                 rep.missed.append(f"{what} {want - have}건")
         if plan.replace_all and not rep.replaced:
             rep.missed.append("찾아 바꿀 글자")
         return rep
+
+    def _refit(self, old: int, new: int):
+        """본문 폭이 바뀌면(용지 방향·여백·다단) 본문의 표·그림·글상자 폭을 같은 비율로 맞춘다.
+        표지처럼 자리를 따로 정해 둔(글자처럼 취급하지 않는) 개체는 건드리지 않는다."""
+        if not old or not new or abs(new - old) < 300:
+            return
+        from .objects import resize_picture
+        ratio = new / old
+        for p in self.doc.top_paragraphs():
+            for obj in [c for run in p.iterfind(RUN) for c in run if c.tag != T and c.find(SZ) is not None]:
+                pos = obj.find(hp("pos"))
+                width = int(obj.find(SZ).get("width", "0") or 0)
+                if pos is None or pos.get("treatAsChar") != "1" or not width:
+                    continue
+                if obj.tag == TBL:
+                    for tbl in obj.iter(TBL):   # 표 안의 표도 같은 비율로
+                        for el in [tbl.find(SZ), *(tc.find(CELLSZ) for tr in tbl.iterfind(TR) for tc in tr.iterfind(TC))]:
+                            if el is not None:
+                                el.set("width", str(int(int(el.get("width", "0") or 0) * ratio)))
+                    strip_lineseg(obj)
+                elif ratio < 1 and width > new:   # 그림·글상자는 넘칠 때만 줄인다
+                    # 글상자는 폭만, 그림은 가로세로 비율을 지켜 줄인다
+                    is_box = obj.find(f".//{SUBLIST}") is not None
+                    resize_picture(obj, new, int(obj.find(SZ).get("height", "0") or 0) if is_box else None)
+                else:
+                    continue
+                mark_changed(p)
 
     # ── 표 틀만 없애기 / 테두리 ─────────────────────────────────────────
     def _table_of(self, ref: str):
@@ -260,6 +366,69 @@ class Editor:
         for tr in tbl.iterfind(TR):
             for tc in tr.iterfind(TC):
                 tc.set("borderFillIDRef", self.doc.borderfill_variant(tc.get("borderFillIDRef", "1"), on))
+        return True
+
+    def _cells_of(self, ref: str) -> list:
+        """S번호 → 그 줄이 든 칸 하나, T번호 → 그 행들의 칸, B번호 → 표의 모든 칸."""
+        o = self.outline
+        if ref in o.lines:
+            sl = o.lines[ref].getparent()
+            tc = sl.getparent() if sl is not None and sl.tag == SUBLIST else None
+            return [tc] if tc is not None and tc.tag == TC else []   # 글상자 안의 줄은 표 칸이 아니다
+        if ref in o.tables:
+            return [tc for tr in o.tables[ref].trs for tc in tr.iterfind(TC)]
+        if ref in o.boxes:
+            return [tc for tr in o.boxes[ref].iterfind(TR) for tc in tr.iterfind(TC)]
+        return []
+
+    def set_cell_background(self, ref: str, color) -> bool:
+        cells = self._cells_of(ref)
+        for tc in cells:
+            tc.set("borderFillIDRef", self.doc.cellfill_variant(tc.get("borderFillIDRef", "1"), color))
+        return bool(cells)
+
+    def set_col_widths(self, ref: str, widths) -> bool:
+        """표의 열 너비를 비율(예: [20, 50, 30])대로 다시 나눈다. 표 전체 폭은 그대로."""
+        tbl = self._table_of(ref)
+        try:
+            ws = [float(w) for w in widths]
+        except (TypeError, ValueError):
+            return False
+        if tbl is None or not ws or min(ws) <= 0 or len(ws) != int(tbl.get("colCnt", "0") or 0):
+            return False
+        sz = tbl.find(SZ)
+        total = int(sz.get("width")) if sz is not None else 0
+        if not total:   # 표 폭이 없으면 칸 합치기가 없는 첫 행의 폭을 더한다
+            total = sum(int(tc.find(CELLSZ).get("width")) for tc in tbl.find(TR).iterfind(TC))
+        cols = [int(total * w / sum(ws)) for w in ws]
+        cols[-1] += total - sum(cols)
+        for tr in tbl.iterfind(TR):
+            for tc in tr.iterfind(TC):
+                addr, span, csz = tc.find(CELLADDR), tc.find(CELLSPAN), tc.find(CELLSZ)
+                if addr is None or csz is None:
+                    continue
+                c = int(addr.get("colAddr", "0"))
+                n = int(span.get("colSpan", "1")) if span is not None else 1
+                csz.set("width", str(sum(cols[c:c + n])))
+        strip_lineseg(tbl)
+        mark_changed(top_para(tbl))
+        return True
+
+    def set_row_height(self, ref: str, mm) -> bool:
+        """칸 높이(mm): S번호면 그 칸이 든 행, T번호면 그 행들, B번호면 표의 모든 행."""
+        try:
+            h = int(float(mm) * HWPUNIT_PER_MM)
+        except (TypeError, ValueError):
+            return False
+        cells = self._cells_of(ref)
+        if not cells or not 0 < h < 80000:
+            return False
+        for tr in {tc.getparent() for tc in cells}:
+            for tc in tr.iterfind(TC):
+                span, csz = tc.find(CELLSPAN), tc.find(CELLSZ)
+                if csz is not None and (span is None or span.get("rowSpan", "1") == "1"):
+                    csz.set("height", str(h))
+        mark_changed(top_para(cells[0]))
         return True
 
     # ── 문서 전체 찾아 바꾸기 ────────────────────────────────────────────
@@ -413,6 +582,19 @@ class Editor:
             if "border" in st and self._table_of(target) is not None:
                 n += self.set_table_border(target, bool(st["border"]))
                 continue
+            done = False
+            if target in o.images and ("width" in st or "height" in st):   # 그림 크기 (mm)
+                from .objects import resize_picture
+                pic = o.images[target]   # 그림 하나(hp:pic) 또는 여러 개를 묶은 틀(hp:container)
+                if resize_picture(pic, _mm(st.get("width")), _mm(st.get("height"))):
+                    mark_changed(top_para(pic))
+                    done = True
+            if "cell_background" in st:
+                done = self.set_cell_background(target, st["cell_background"]) or done
+            if "col_widths" in st:
+                done = self.set_col_widths(target, st["col_widths"]) or done
+            if "row_height" in st:
+                done = self.set_row_height(target, st["row_height"]) or done
             ts, ps = [], []
             if target in o.lines:
                 p = o.lines[target]
@@ -426,9 +608,16 @@ class Editor:
                 hp_ = heading_parts(o.headings[target])
                 ts = list(hp_[2].iter(T)) if hp_ else []
                 ps = [o.headings[target]]
+            elif target.lower() in ("all", "전체"):
+                # 문서 전체 (표 칸 안의 줄 포함): 글꼴·줄 간격을 한꺼번에 바꿀 때
+                ps = [p for root in self.doc.ordered_sections() for p in root.iter(P)]
+            elif target in o.tables or target in o.boxes:
+                # 표: 그 표(T는 그 행들) 칸 안의 모든 줄
+                ps = [p for tc in self._cells_of(target) for p in tc.iter(P)]
+            if not ts:
+                ts = [t for p in ps for t in p.iterfind(TEXT_PATH) if t_text(t)]
             style = {k: st[k] for k in STYLE_KEYS if k in st}
             para = {k: st[k] for k in PARA_KEYS if k in st}
-            done = False
             if style:
                 for t in ts:
                     if t.getparent() is not None and self.apply_style(t, style, st.get("part")):
@@ -451,6 +640,13 @@ class Editor:
         o = self.outline
         if ref in o.headings:
             return o.headings[ref]
+        # 표(T·B)나 그림(I)을 기준으로 삼으면 그 표·그림이 든 문단의 앞·뒤
+        obj = o.tables[ref].tbl if ref in o.tables else o.boxes.get(ref, o.images.get(ref))
+        if obj is not None:
+            holder = obj.getparent().getparent() if obj.getparent() is not None else None
+            if holder is None or holder.getparent() is None:
+                return None
+            return holder if in_cell and holder.getparent().tag == SUBLIST else top_para(holder)
         p = o.lines.get(ref)
         if p is None or p.getparent() is None:
             return None
@@ -459,8 +655,9 @@ class Editor:
         # 그 밖에는 그 표를 담은 본문 문단(섹션 바로 아래 문단)을 기준으로 삼는다
         return top_para(p)
 
-    def _table_proto(self):
-        """새 표의 본보기: 본문의 단순한 표 → 문서 어디든(표 안 포함) 단순한 표 → 장 제목이 아닌 아무 표."""
+    def _table_proto(self, like=None):
+        """새 표의 본보기: 본문의 단순한 표 → 문서 어디든(표 안 포함) 단순한 표 → 장 제목이 아닌 아무 표
+        → 표가 하나도 없는 문서(공문 등)는 실선 테두리의 기본 표 (글자 모양은 like 줄을 따름)."""
         proto = self._protos().get("table")
         if proto is not None:
             return proto
@@ -473,22 +670,26 @@ class Editor:
                 simple = p
             if other is None and tbl.find(f".//{TR}//{TBL}") is None:
                 other = p
-        return simple if simple is not None else other
+        if simple is not None or other is not None:
+            return simple if simple is not None else other
+        run = like.find(RUN) if like is not None else None
+        return plain_table_paragraph(self.doc.borderfill_variant("", True), self.doc.text_width(),
+                                     run.get("charPrIDRef", "0") if run is not None else "0")
 
-    def _new_table(self, spec: dict, anchor):
+    def _new_table(self, spec, anchor):
         """inserts의 table({columns, rows})로 새 표 문단을 만든다. 칸 안이면 그 칸 폭에 맞춘다."""
-        cols = [str(c) for c in (spec.get("columns") or [])]
-        proto = self._table_proto()
-        if not cols or proto is None:
+        spec = _table_spec(spec)
+        if spec is None:
             return None
+        cols = spec["columns"]
+        proto = self._table_proto(anchor)
         width = None
         sl = anchor.getparent()
         if sl is not None and sl.tag == SUBLIST:
             sz = sl.getparent().find(CELLSZ)
             if sz is not None:
                 width = max(int(sz.get("width", "0")) - 1200, 2000)   # 칸 안쪽 여백만큼 줄임
-        rows = [r if isinstance(r, list) else [r] for r in (spec.get("rows") or [])]
-        return build_table_paragraph(proto, cols, rows, width)
+        return build_table_paragraph(proto, cols, spec["rows"], width)
 
     @staticmethod
     def _plain_line(base, text: str):
@@ -535,18 +736,22 @@ class Editor:
     def insert_lines(self, inserts: list) -> int:
         n = 0
         for ins in inserts:
-            table = ins.get("table") if isinstance(ins.get("table"), dict) else None
-            if not ins.get("lines") and not table:
+            lines = as_lines(ins.get("lines"))
+            if not lines and not any(ins.get(k) is not None for k in INSERT_OBJECTS):
                 continue
             before = ins.get("before")
             anchor = self._anchor_para(str(before or ins.get("after", "")).strip(), in_cell=True)
             if anchor is None:
                 continue
-            new_ps = self._make_lines(anchor, ins.get("lines") or [], bool(before))
-            if table:
-                tp = self._new_table(table, anchor)
-                if tp is not None:
-                    new_ps.append(tp)
+            new_ps = self._make_lines(anchor, lines, bool(before))
+            for kind in INSERT_OBJECTS:
+                if ins.get(kind) is not None:
+                    try:
+                        obj = self._new_object(kind, ins, anchor)
+                    except Exception:
+                        obj = None   # 그림 파일을 못 읽는 등: '반영하지 못함'으로 알린다
+                    if obj is not None:
+                        new_ps.append(obj)
             if before:
                 for np_ in new_ps:
                     anchor.addprevious(np_)
@@ -556,6 +761,200 @@ class Editor:
                     cur.addnext(np_)
                     cur = np_
             n += len(new_ps)
+        return n
+
+    def _width_at(self, anchor) -> int:
+        """anchor 자리에 넣을 개체가 쓸 수 있는 폭: 표 칸 안이면 칸 폭, 아니면 본문 폭."""
+        sl = anchor.getparent()
+        if sl is not None and sl.tag == SUBLIST and sl.getparent().find(CELLSZ) is not None:
+            return max(int(sl.getparent().find(CELLSZ).get("width", "0")) - 1200, 2000)
+        return self.doc.text_width()
+
+    def _new_object(self, kind: str, ins: dict, anchor):
+        """inserts의 table·equation·image·textbox·chart 하나를 문단으로 만든다. 못 만들면 None."""
+        from . import objects as ob
+        spec = ins[kind]
+        if kind == "table":
+            return self._new_table(spec, anchor)
+        room = self._width_at(anchor)
+        run = anchor.find(RUN)
+        char_id = run.get("charPrIDRef", "0") if run is not None else "0"
+        if kind == "equation":
+            return ob.equation_paragraph(spec, char_id=char_id) if str(spec).strip() else None
+        if kind == "textbox":
+            box = spec if isinstance(spec, dict) else {"lines": spec}
+            lines = as_lines(box.get("lines"))
+            if not lines:
+                return None
+            return ob.textbox_paragraph(lines, min(_mm(box.get("width")) or room, room), char_id=char_id,
+                                        fill=hex_color(box["background"]) if box.get("background") else "#FFFFFF",
+                                        border=box.get("border", True) is not False)
+        if kind == "chart":
+            from .chart import parse_chart, render_chart
+            chart = parse_chart(spec)
+            if chart is None:
+                return None
+            data, ext, size, name = render_chart(chart), "png", (1200, 720), chart["title"] or "차트"
+        else:   # image: 사용자가 붙인 그림 파일만 (이름으로 찾는다)
+            path = self._find_image(spec.get("file") if isinstance(spec, dict) else spec)
+            if path is None:
+                return None
+            from PIL import Image
+            with open(path, "rb") as f:
+                data = f.read()
+            with Image.open(io.BytesIO(data)) as im:
+                size = im.size
+            ext, name = os.path.splitext(path)[1], os.path.basename(path)
+        want = _mm(ins.get("width")) or (_mm(spec.get("width")) if isinstance(spec, dict) else 0)
+        # 크기를 말하지 않으면: 차트는 본문 폭의 60%, 그림은 원래 크기(1픽셀 = 75, 96dpi) — 본문 폭을 넘지 않게
+        w = min(want or (int(room * 0.6) if kind == "chart" else size[0] * 75), room)
+        return ob.picture_paragraph(self.doc.add_image(data, ext), w, int(w * size[1] / size[0]), name=name)
+
+    def _find_image(self, name) -> str | None:
+        name = os.path.splitext(str(name or "").strip().lower())[0]
+        for key, path in self.images.items():
+            if name and os.path.splitext(key.lower())[0] == name:
+                return path
+        return next(iter(self.images.values())) if len(self.images) == 1 else None
+
+    # ── 각주 ────────────────────────────────────────────────────────────
+    def add_footnotes(self, notes: list) -> int:
+        """{"target": "S12", "text": "각주 글", "part": "이 글자 뒤(없으면 줄 끝)"}"""
+        from . import objects as ob
+        n = 0
+        for note in notes:
+            p = self.outline.lines.get(str(note.get("target", "")).strip())
+            text = str(note.get("text", "")).strip()
+            if p is None or p.getparent() is None or not text:
+                continue
+            ts = [t for t in p.iterfind(TEXT_PATH) if t_text(t)]
+            part = str(note.get("part") or "")
+            t = next((t for t in ts if part and part in t_text(t)), ts[-1] if ts else None)
+            if t is None:
+                continue
+            ctrl = ob.footnote_ctrl(text, self.doc.style_ids("각주"))
+            whole = t_text(t)
+            cut = whole.index(part) + len(part) if part and part in whole else len(whole)
+            set_t(t, whole[:cut])
+            t.addnext(ctrl)
+            if whole[cut:]:   # 각주 뒤에 남은 글자
+                rest = etree.Element(T)
+                rest.text = whole[cut:]
+                ctrl.addnext(rest)
+            mark_changed(top_para(p))
+            n += 1
+        if n:
+            ob.renumber_footnotes(self.doc.ordered_sections())
+        return n
+
+    # ── 칸 합치기 / 나누기 ───────────────────────────────────────────────
+    def _cell_at(self, ref):
+        """칸을 가리키는 말 → (표, 칸). S번호(그 줄이 든 칸) 또는 {"table": "B3", "cell": [행, 열]} (1부터)."""
+        if isinstance(ref, dict):
+            tbl = self._table_of(ref.get("table", ""))
+            pos = ref.get("cell")
+            if tbl is None or not isinstance(pos, (list, tuple)) or len(pos) != 2:
+                return None, None
+            try:
+                r, c = int(pos[0]) - 1, int(pos[1]) - 1
+            except (TypeError, ValueError):
+                return None, None
+            return tbl, _grid(tbl).get((r, c))
+        cells = self._cells_of(str(ref).strip()) if str(ref).strip() in self.outline.lines else []
+        return (cells[0].getparent().getparent(), cells[0]) if cells else (None, None)
+
+    def merge_cells(self, merges: list) -> int:
+        """{"from": "S12", "to": "S15"} 또는 {"table": "B3", "from": [1, 1], "to": [2, 3]} — 두 칸을 모서리로 하는
+        네모 범위를 한 칸으로 합친다. 글은 왼쪽 위 칸에 차례로 모은다."""
+        n = 0
+        for m in merges:
+            def ref(v):
+                return {"table": m.get("table"), "cell": v} if isinstance(v, (list, tuple)) else v
+            tbl, a = self._cell_at(ref(m.get("from")))
+            tbl2, b = self._cell_at(ref(m.get("to")))
+            if a is None or b is None or tbl is not tbl2 or a is b:
+                continue
+            (r1, c1, rs1, cs1), (r2, c2, rs2, cs2) = _span(a), _span(b)
+            top, left = min(r1, r2), min(c1, c2)
+            bottom, right = max(r1 + rs1, r2 + rs2), max(c1 + cs1, c2 + cs2)
+            grid = _grid(tbl)
+            cells = {id(tc): tc for (r, c), tc in grid.items() if top <= r < bottom and left <= c < right}
+            spans = {k: _span(tc) for k, tc in cells.items()}
+            # 범위 밖으로 걸친 칸이 있거나, 한 행이 통째로 사라지면 합치지 않는다
+            if any(r < top or c < left or r + rs > bottom or c + cs > right for r, c, rs, cs in spans.values()):
+                continue
+            if right - left == int(tbl.get("colCnt", "0") or 0) and bottom - top > 1:
+                continue
+            first = grid[(top, left)]
+            width = sum(int(tc.find(CELLSZ).get("width")) for k, tc in cells.items() if spans[k][0] == top)
+            height = sum(int(tc.find(CELLSZ).get("height")) for k, tc in cells.items() if spans[k][1] == left)
+            sl = first.find(SUBLIST)
+            for k, tc in sorted(cells.items(), key=lambda kv: spans[kv[0]][:2]):
+                if tc is first:
+                    continue
+                for p in list(tc.find(SUBLIST).iterfind(P)) if tc.find(SUBLIST) is not None else []:
+                    if para_text(p).strip() or has_objects(p):
+                        if len(sl.findall(P)) == 1 and is_blank(sl.find(P)):
+                            sl.remove(sl.find(P))
+                        sl.append(p)
+                tc.getparent().remove(tc)
+            first.find(CELLSPAN).set("rowSpan", str(bottom - top))
+            first.find(CELLSPAN).set("colSpan", str(right - left))
+            first.find(CELLSZ).set("width", str(width))
+            first.find(CELLSZ).set("height", str(height))
+            strip_lineseg(tbl)
+            mark_changed(top_para(tbl))
+            n += 1
+        return n
+
+    def split_cells(self, splits: list) -> int:
+        """합쳐진 칸을 원래 격자대로 다시 나눈다. "S12" 또는 {"table": "B3", "cell": [1, 1]}"""
+        n = 0
+        for ref in splits:
+            tbl, tc = self._cell_at(ref)
+            if tc is None:
+                continue
+            r0, c0, rs, cs = _span(tc)
+            if rs == 1 and cs == 1:
+                continue
+            grid = _grid(tbl)
+            trs = tbl.findall(TR)
+
+            def size(index, axis):
+                """그 열의 폭(axis 0)·그 행의 높이(axis 1): 합쳐지지 않은 다른 칸에서 찾고, 없으면 고르게 나눈다."""
+                for (r, c), other in grid.items():
+                    sp = _span(other)
+                    if other is not tc and axis == 0 and (c, sp[3]) == (index, 1):
+                        return int(other.find(CELLSZ).get("width"))
+                    if other is not tc and axis == 1 and (r, sp[2]) == (index, 1):
+                        return int(other.find(CELLSZ).get("height"))
+                whole = int(tc.find(CELLSZ).get("width" if axis == 0 else "height"))
+                return whole // (cs if axis == 0 else rs)
+            widths = [size(c0 + j, 0) for j in range(cs)]
+            heights = [size(r0 + i, 1) for i in range(rs)]
+            for i in range(rs):
+                for j in range(cs):
+                    if i == 0 and j == 0:
+                        cell = tc
+                    else:
+                        cell = copy.deepcopy(tc)
+                        strip_lineseg(cell)
+                        sl = cell.find(SUBLIST)
+                        for p in sl.findall(P)[1:]:
+                            sl.remove(p)
+                        set_cell(cell, "")
+                        row = trs[r0 + i]
+                        before = [t for t in row.findall(TC) if int(t.find(CELLADDR).get("colAddr")) < c0 + j]
+                        before[-1].addnext(cell) if before else row.insert(0, cell)
+                    cell.find(CELLADDR).set("rowAddr", str(r0 + i))
+                    cell.find(CELLADDR).set("colAddr", str(c0 + j))
+                    cell.find(CELLSPAN).set("rowSpan", "1")
+                    cell.find(CELLSPAN).set("colSpan", "1")
+                    cell.find(CELLSZ).set("width", str(widths[j]))
+                    cell.find(CELLSZ).set("height", str(heights[i]))
+            strip_lineseg(tbl)
+            mark_changed(top_para(tbl))
+            n += 1
         return n
 
     # ── 장 번호 ─────────────────────────────────────────────────────────
@@ -651,13 +1050,13 @@ class Editor:
             ws = leading_ws("".join(t_text(t) for t in title_cell.iter(T)))
             set_cell(title_cell, ws + title)
             new_ps = [head]
-            for line in sec.get("lines") or []:
-                proto = protos.get(marker_of(str(line)), fallback)
+            for line in as_lines(sec.get("lines")):
+                proto = protos.get(marker_of(line), fallback)
                 if proto is not None:
-                    new_ps.append(clone_line(proto, str(line)))
-            table = sec.get("table")
-            if isinstance(table, dict) and table.get("columns") and protos.get("table") is not None:
-                new_ps.append(build_table_paragraph(protos["table"], table["columns"], table.get("rows", [])))
+                    new_ps.append(clone_line(proto, line))
+            table = _table_spec(sec.get("table"))
+            if table is not None:
+                new_ps.append(build_table_paragraph(self._table_proto(fallback), table["columns"], table["rows"]))
 
             blank = protos.get("blank")
             if nxt is not None:

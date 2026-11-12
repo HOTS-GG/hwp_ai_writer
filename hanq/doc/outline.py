@@ -10,7 +10,7 @@
 import re
 
 from .document import HwpxDocument
-from .xml import (HWPUNIT_PER_MM, NUMBER_ONLY, P, PIC, PLACEHOLDER, RUN, SUBLIST, SZ, T, TBL, TC, TR, CELLSPAN,
+from .xml import (CELLADDR, HWPUNIT_PER_MM, NUMBER_ONLY, P, PIC, PLACEHOLDER, RUN, SUBLIST, SZ, T, TBL, TC, TR, CELLSPAN,
                   cell_text, ensure_t, has_objects, has_secpr, heading_parts, is_blank, para_text)
 
 CELL_PREFIX = "  │ "
@@ -198,7 +198,8 @@ class Outline:
                 gid = f"T{len(self.tables) + 1}"
                 group = TableGroup(gid, tbl, trs[i:j + 1], header)
                 self.tables[gid] = group
-                self._out.append(f"{prefix}[{gid}] 표 — 열 {group.ncols}개: " + " | ".join(header))
+                rows = f" ({i + 1}~{j + 1}행)" if self.edit else ""
+                self._out.append(f"{prefix}[{gid}] 표 — 열 {group.ncols}개{rows}: " + " | ".join(header))
                 label = "행" if self.edit else "예시행"
                 for tr in group.trs:
                     self._out.append(f"{prefix}    {label}: " + " | ".join(cell_text(tc) for tc in tr.findall(TC)))
@@ -209,5 +210,17 @@ class Outline:
                     continue
                 sl = tc.find(SUBLIST)
                 if sl is not None:
+                    at = len(self._out)
                     self._walk(sl, prefix + CELL_PREFIX)
+                    self._mark_cell(tc, at, prefix + CELL_PREFIX)
             i += 1
+
+    def _mark_cell(self, tc, at: int, prefix: str):
+        """수정 모드: 칸의 첫 줄에 (행,열)과 합쳐진 크기를 적는다 — 칸 합치기·나누기에서 칸을 가리킬 수 있게."""
+        addr, span = tc.find(CELLADDR), tc.find(CELLSPAN)
+        if not self.edit or addr is None or at >= len(self._out) or not self._out[at].startswith(prefix):
+            return
+        tag = f"({int(addr.get('rowAddr', '0')) + 1}행 {int(addr.get('colAddr', '0')) + 1}열"
+        if span is not None and (span.get("rowSpan", "1") != "1" or span.get("colSpan", "1") != "1"):
+            tag += f", {span.get('rowSpan', '1')}행×{span.get('colSpan', '1')}열 합침"
+        self._out[at] = f"{prefix}{tag}) {self._out[at][len(prefix):]}"
