@@ -18,6 +18,13 @@ def _num(v) -> float | None:
     return float(m.group(1)) if m else None
 
 
+BORDER_SIDES = ("left", "right", "top", "bottom")
+BORDER_TYPES = {"solid": "SOLID", "실선": "SOLID", "dashed": "DASH", "dash": "DASH", "파선": "DASH", "점선": "DOT",
+                "dotted": "DOT", "dot": "DOT", "double": "DOUBLE_SLIM", "이중": "DOUBLE_SLIM", "이중선": "DOUBLE_SLIM",
+                "none": "NONE", "없음": "NONE"}
+BORDER_WIDTHS = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0)   # 한글이 쓰는 굵기(mm)
+
+_LINESEG_RX = re.compile(rb"<(\w+:)?linesegarray\b.*?</(\w+:)?linesegarray>", re.S)
 HEADER_NAME = "Contents/header.xml"
 SECTION_RE = re.compile(r"^Contents/section\d+\.xml$")
 _PARSER = etree.XMLParser(remove_blank_text=False, huge_tree=True)
@@ -67,8 +74,10 @@ class HwpxDocument:
                 z.writestr(zi, data)
 
     def snapshot(self) -> bytes:
-        """본문 XML 전체. 수정 전후를 비교해 실제로 바뀐 게 있는지 본다."""
-        return b"".join(etree.tostring(r) for r in self.ordered_sections())
+        """본문 XML 전체. 수정 전후를 비교해 실제로 바뀐 게 있는지 본다.
+        줄 배치 정보는 뺀다: 받는 중인 글자를 화면에 보여 주는 것만으로도 지워져서, AI가 같은 글을 그대로
+        돌려줘도 '고쳐졌다'고 잘못 세는 일이 있었다."""
+        return b"".join(_LINESEG_RX.sub(b"", etree.tostring(r)) for r in self.ordered_sections())
 
     def read_item(self, name: str) -> bytes | None:
         return next((d for i, d in self._items if i.filename == name), None)
@@ -260,6 +269,31 @@ class HwpxDocument:
                     bs.set("keepWithNext", "1" if para["keep_with_next"] else "0")
         key = tuple(sorted((k, str(v)) for k, v in para.items()))
         return self._variant("paraProperties", "paraPr", base_id, key, change)
+
+    def border_variant(self, base_id: str, spec: dict) -> str:
+        """테두리 모양을 복제해 선 종류(type)·굵기(width mm)·색(color)을 바꾼 id. sides에 든 변만 (없으면 네 변)."""
+        kind = BORDER_TYPES.get(str(spec.get("type", "")).strip().lower())
+        width = _num(spec.get("width"))
+        if width is not None:
+            width = min(BORDER_WIDTHS, key=lambda w: abs(w - width))
+        color = hex_color(spec["color"]) if spec.get("color") else None
+        sides = [s for s in (spec.get("sides") or BORDER_SIDES) if s in BORDER_SIDES] or list(BORDER_SIDES)
+
+        def change(bf):
+            for side in sides:
+                e = bf.find(hh(f"{side}Border"))
+                if e is None:
+                    continue
+                if kind:
+                    e.set("type", kind)
+                elif e.get("type") == "NONE" and (width is not None or color):
+                    e.set("type", "SOLID")   # 굵기·색만 줬는데 선이 없던 변: 실선으로 보이게
+                if width is not None:
+                    e.set("width", f"{width:g} mm")
+                if color:
+                    e.set("color", color)
+        key = ("line", kind, width, color, tuple(sides))
+        return self._variant("borderFills", "borderFill", base_id, key, change)
 
     def cellfill_variant(self, base_id: str, color) -> str:
         """테두리 모양을 복제해 칸 배경색만 바꾼 id (color가 비거나 'none'이면 배경색 없앰)."""

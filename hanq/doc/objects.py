@@ -90,15 +90,21 @@ def resize_picture(pic, width: int | None, height: int | None) -> bool:
     return True
 
 
+def equation_size(script: str) -> tuple[int, int]:
+    """수식 글로 어림한 (폭, 높이). 한글이 열 때 다시 재지만, 그 전까지 자리를 비슷하게 잡아 둔다."""
+    tall = any(k in script for k in ("over", "sum", "int", "matrix", "cases", "lim", "prod"))
+    width = max(2500, min(40000, int(len(script.replace("{", "").replace("}", "")) * 420)))
+    return width, 2588 if tall else 1200
+
+
 def equation_paragraph(script: str, para_id="0", char_id="0"):
     """한글 수식 (수식 편집기 글: 'x= {-b +- sqrt {b^2 -4ac}} over {2a}')."""
     script = str(script).strip()
-    tall = any(k in script for k in ("over", "sum", "int", "matrix", "cases", "lim", "prod"))
-    width = max(2500, min(40000, int(len(script.replace("{", "").replace("}", "")) * 420)))
+    width, height = equation_size(script)
     eq = (f'<hp:equation id="{new_id()}" zOrder="0" numberingType="EQUATION" textWrap="TOP_AND_BOTTOM" '
           'textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" version="Equation Version 60" baseLine="71" '
           'textColor="#000000" baseUnit="1000" lineMode="CHAR" font="HancomEQN">'
-          f'<hp:sz width="{width}" widthRelTo="ABSOLUTE" height="{2588 if tall else 1200}" heightRelTo="ABSOLUTE" '
+          f'<hp:sz width="{width}" widthRelTo="ABSOLUTE" height="{height}" heightRelTo="ABSOLUTE" '
           f'protect="0"/>{_POS.replace("COLUMN", "PARA")}<hp:outMargin left="56" right="56" top="0" bottom="0"/>'
           f'<hp:shapeComment>수식입니다.</hp:shapeComment><hp:script>{escape(script)}</hp:script></hp:equation><hp:t/>')
     return etree.fromstring(_p(eq, para_id, char_id))
@@ -129,27 +135,50 @@ def textbox_paragraph(lines: list[str], width: int, para_id="0", char_id="0", fi
     return etree.fromstring(_p(rect, para_id, char_id))
 
 
-def footnote_ctrl(text: str, ids: tuple = ("0", "0", "0")):
-    """각주 하나 (본문 줄의 run 안에 넣는 hp:ctrl). 번호는 넣은 뒤 renumber_footnotes()로 매긴다.
-    ids = 각주 스타일의 (문단 모양, 글자 모양, 스타일) id."""
-    auto = ('<hp:ctrl><hp:autoNum num="1" numType="FOOTNOTE"><hp:autoNumFormat type="DIGIT" userChar="" '
+def footnote_ctrl(text: str, ids: tuple = ("0", "0", "0"), endnote: bool = False):
+    """각주(또는 미주) 하나 (본문 줄의 run 안에 넣는 hp:ctrl). 번호는 넣은 뒤 renumber_footnotes()로 매긴다.
+    ids = 각주·미주 스타일의 (문단 모양, 글자 모양, 스타일) id."""
+    tag, num_type = ("endNote", "ENDNOTE") if endnote else ("footNote", "FOOTNOTE")
+    auto = (f'<hp:ctrl><hp:autoNum num="1" numType="{num_type}"><hp:autoNumFormat type="DIGIT" userChar="" '
             'prefixChar="" suffixChar=")" supscript="0"/></hp:autoNum></hp:ctrl>')
-    xml = (f'<hp:ctrl {_NS}><hp:footNote number="1" suffixChar="41" instId="{_inst()}">'
+    xml = (f'<hp:ctrl {_NS}><hp:{tag} number="1" suffixChar="41" instId="{_inst()}">'
            f'{_SUBLIST.format(va="TOP", tw=0, th=0)}'
            f'{_text_p(" " + str(text).strip(), *ids, before=auto).replace(f" {_NS}", "")}'
-           '</hp:subList></hp:footNote></hp:ctrl>')
+           f'</hp:subList></hp:{tag}></hp:ctrl>')
     return etree.fromstring(xml)
 
 
 def renumber_footnotes(roots) -> int:
-    n = 0
-    for root in roots:
-        for fn in root.iter(f"{{{HP}}}footNote"):
-            n += 1
-            fn.set("number", str(n))
-            for auto in fn.iter(f"{{{HP}}}autoNum"):
-                auto.set("num", str(n))
-    return n
+    """각주와 미주 번호를 문서 순서대로 다시 매긴다 (각각 1부터)."""
+    total = 0
+    for tag in ("footNote", "endNote"):
+        n = 0
+        for root in roots:
+            for fn in root.iter(f"{{{HP}}}{tag}"):
+                n += 1
+                fn.set("number", str(n))
+                for auto in fn.iter(f"{{{HP}}}autoNum"):
+                    auto.set("num", str(n))
+        total += n
+    return total
+
+
+def hyperlink_runs(url: str, char_id="0"):
+    """하이퍼링크의 시작·끝 표시가 든 run 두 개. 그 사이에 놓인 글자가 링크가 된다."""
+    fid, inst = _inst(), _inst()
+    url = escape(str(url).strip())
+    begin = (f'<hp:run {_NS} charPrIDRef="{char_id}"><hp:ctrl><hp:fieldBegin id="{fid}" type="HYPERLINK" name="" '
+             f'editable="0" dirty="1" zorder="-1" fieldid="{inst}"><hp:parameters cnt="6" name="">'
+             '<hp:integerParam name="Prop">0</hp:integerParam>'
+             f'<hp:stringParam name="Command">{url.replace(";", "%3B")};1;0;0;</hp:stringParam>'
+             f'<hp:stringParam name="Path">{url}</hp:stringParam>'
+             '<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>'
+             '<hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_BOOKMARK</hp:stringParam>'
+             '<hp:stringParam name="DocOpenType">HWPHYPERLINK_JUMP_CURRENTTAB</hp:stringParam>'
+             '</hp:parameters></hp:fieldBegin></hp:ctrl></hp:run>')
+    end = (f'<hp:run {_NS} charPrIDRef="{char_id}"><hp:ctrl><hp:fieldEnd beginIDRef="{fid}" fieldid="{inst}"/>'
+           '</hp:ctrl></hp:run>')
+    return etree.fromstring(begin), etree.fromstring(end)
 
 
 def header_ctrl(kind: str, text: str, text_width: int, ids: tuple = ("0", "0", "0")):

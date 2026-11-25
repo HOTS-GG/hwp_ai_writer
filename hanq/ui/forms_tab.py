@@ -175,7 +175,13 @@ class FormsTab:
                                      udir)
             else:
                 last = udir / Path(p).name
-                shutil.copy(p, last)
+                try:
+                    shutil.copy(p, last)
+                except shutil.SameFileError:
+                    pass   # 내 양식 폴더에 이미 있는 그 파일을 고른 경우: 그대로 고르기만 한다
+                except OSError as e:
+                    messagebox.showerror("양식 추가 실패", f"{Path(p).name}\n\n{e}")
+                    last = None
         self.app.reload_forms()
         self.app.status(f"양식 {len(paths)}개 추가됨")
         if last is not None:

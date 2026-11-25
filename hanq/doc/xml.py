@@ -85,16 +85,38 @@ def leading_ws(s: str) -> str:
 
 # ── 글자 (hp:t) ────────────────────────────────────────────────────────────
 
+LINE_BREAK = "↵"   # 문단 안의 줄 나눔(Shift+Enter)을 글에서 나타내는 기호
+_INLINE = {hp("tab"): "\t", hp("lineBreak"): LINE_BREAK, hp("nbSpace"): " ", hp("fwSpace"): "　"}
+_INLINE_RX = re.compile(f"([\t{LINE_BREAK}])")
+
+
 def t_text(t) -> str:
-    return "".join(t.itertext())
+    """글자 조각의 글. 탭은 '\\t', 줄 나눔은 '↵'로 읽는다 (AI가 표·서명란의 탭 정렬을 볼 수 있게)."""
+    if not len(t):
+        return t.text or ""
+    out = [t.text or ""]
+    for c in t:
+        out.append(_INLINE.get(c.tag, "".join(c.itertext())))
+        out.append(c.tail or "")
+    return "".join(out)
 
 
 def set_t(t, text: str):
-    if t_text(t) == text and not len(t):
+    """글자 조각의 글을 바꾼다. '\\t'는 탭, '↵'는 줄 나눔으로 넣는다 (원래 있던 탭의 모양은 차례대로 물려받는다)."""
+    if t_text(t) == text:
         return
+    old_tabs = [c for c in t if c.tag == hp("tab")]
     for c in list(t):
         t.remove(c)
-    t.text = text
+    parts = _INLINE_RX.split(text)
+    t.text = parts[0]
+    for i in range(1, len(parts), 2):
+        if parts[i] == "\t":
+            el = old_tabs.pop(0) if old_tabs else etree.Element(hp("tab"), width="0", leader="0", type="0")
+        else:
+            el = etree.Element(hp("lineBreak"))
+        el.tail = parts[i + 1]
+        t.append(el)
     run = t.getparent()
     if run is not None and run.getparent() is not None:
         mark_changed(run.getparent())
@@ -156,9 +178,34 @@ def set_para_text(p, text: str):
     if not ts:
         set_t(ensure_t(p), text)
         return
+    olds = [t_text(t) for t in ts]
+    old = "".join(olds)
+    if old == text:
+        return
+    if len(ts) > 1 and old.strip():
+        # 바뀌지 않은 앞·뒤 글자는 제 조각(굵게·색 등 모양)에 그대로 두고, 바뀐 가운데만 갈아 끼운다
+        a = 0
+        while a < min(len(old), len(text)) and old[a] == text[a]:
+            a += 1
+        b = 0
+        while b < min(len(old), len(text)) - a and old[-1 - b] == text[-1 - b]:
+            b += 1
+        if a + b >= max(3, len(old) // 5):   # 거의 다 바뀐 줄은 아래의 예전 방식으로
+            mid, end, pos, placed = text[a:len(text) - b], len(old) - b, 0, False
+            for t, s in zip(ts, olds):
+                lo, hi = pos, pos + len(s)
+                pos = hi
+                new = s[:max(0, min(hi, a) - lo)]
+                # 바뀐 글자는 바뀌기 시작한 자리의 조각에 (끝에 덧붙이는 경우는 마지막 조각에)
+                if not placed and (a < hi or t is ts[-1]):
+                    new += mid
+                    placed = True
+                new += s[max(0, max(lo, end) - lo):] if hi > end else ""
+                set_t(t, new)
+            return
     rest, i = text, 0
     while i < len(ts) - 1:
-        cur = t_text(ts[i])
+        cur = olds[i]
         if cur and rest.startswith(cur) and len(rest) > len(cur):
             rest = rest[len(cur):]
             i += 1
@@ -218,14 +265,26 @@ def cell_text(tc) -> str:
     return " ".join(para_text(p).strip() for p in sl.iterchildren(P)).strip()
 
 
+def cell_lines(tc) -> str:
+    """칸의 글을 줄(문단)마다 '↵'로 이어서 — 표 행을 AI에게 보여 줄 때 (칸 안의 줄 구성이 보이게)."""
+    sl = tc.find(SUBLIST)
+    if sl is None:
+        return ""
+    return LINE_BREAK.join(para_text(p).strip() for p in sl.iterchildren(P)).strip(LINE_BREAK + " ")
+
+
 def set_cell(tc, text: str):
-    """칸의 글자를 text로 바꾼다. 여러 줄이면 첫 줄 모양을 복제해 이어 붙인다."""
+    """칸의 글자를 text로 바꾼다. 여러 줄('\\n' 또는 '↵')이면 첫 줄 모양을 복제해 이어 붙인다.
+    글이 지금과 같으면 손대지 않는다 (칸 안의 줄 나눔·글자 모양이 그대로 남게)."""
     sl = tc.find(SUBLIST)
     ps = sl.findall(P)
+    text = str(text)
+    if text.strip() in (cell_text(tc), cell_lines(tc)) or text.replace("\n", LINE_BREAK).strip() == cell_lines(tc):
+        return
     first = ps[0]
     for extra in ps[1:]:
         sl.remove(extra)
-    lines = str(text).split("\n")
+    lines = text.replace(LINE_BREAK, "\n").split("\n")
     set_para_text(first, lines[0])
     anchor = first
     for line in lines[1:]:

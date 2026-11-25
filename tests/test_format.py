@@ -225,6 +225,155 @@ class ObjectsTest(unittest.TestCase):
         self.assertAlmostEqual(w / h, w0 / h0, places=1)
 
 
+class ReadWriteTest(unittest.TestCase):
+    """AI가 문서를 읽는 것(개요)과, 읽은 대로 고쳐 쓰는 것."""
+
+    def setUp(self):
+        self.doc, self.o, self.ed = _open(PLAN)
+        self.body = [k for k, p in self.o.lines.items()
+                     if p.getparent().tag != SUBLIST and len(para_text(p).strip()) > 8]   # 본문의 긴 줄
+
+    def _apply(self, data, doc=None, o=None):
+        doc, o = doc or self.doc, o or self.o
+        return Editor(doc, o).apply(EditPlan.from_ai(data, o))
+
+    def _again(self):
+        doc = HwpxDocument(data=self.doc.to_bytes())
+        return doc, Outline(doc, edit=True)
+
+    def test_outline_tells_page_and_style(self):
+        text = self.o.text
+        self.assertIn("(문서 설정: 용지 A4 세로", text)
+        self.assertIn("(본문 기본 모양:", text)
+        self.assertRegex(text, r"\[S\d+\] 〔[^〕]*굵게[^〕]*가운데[^〕]*〕")      # 표지 제목
+        self.assertRegex(text, r"\[S\d+\] 〔[^〕]*〕 \(글상자\)")
+        plain = next(ln for ln in text.split("\n") if "1. ○○○○을 통해" in ln)
+        self.assertNotIn("〔", plain)                                            # 본문 기본 모양인 줄은 표시 없음
+
+    def test_echoed_marks_are_dropped(self):
+        from hanq.doc.outline import clean_value
+        self.assertEqual(clean_value("〔16pt 굵게〕 (글상자)  제목"), " 제목")
+        self.assertEqual(clean_value("(2행 1열, 배경 #FFF2CC) 내용"), "내용")
+        self.assertEqual(clean_value("  1. (가) 그대로"), "  1. (가) 그대로")
+        lid = self.body[0]
+        self._apply({"slots": {lid: "〔굵게〕   1. 새 글"}})
+        self.assertEqual(para_text(self.o.lines[lid]), "  1. 새 글")
+
+    def test_tab_and_line_break_round_trip(self):
+        lid = self.body[0]
+        self._apply({"slots": {lid: "이름:\t홍길동↵둘째 줄"}})
+        t = self.o.lines[lid].find(f"{RUN}/{hp('t')}")
+        self.assertEqual([c.tag for c in t], [hp("tab"), hp("lineBreak")])
+        doc, o = self._again()
+        self.assertIn("이름:\t홍길동↵둘째 줄", o.text)
+
+    def test_edit_keeps_other_runs_shape(self):
+        """한 줄에서 일부만 고치면, 손대지 않은 글자의 모양(굵게·색)은 그대로 남는다."""
+        lid = self.body[0]
+        text = para_text(self.o.lines[lid])
+        word = text.strip().split()[1]
+        self._apply({"styles": [{"target": lid, "part": word, "bold": True}]})
+        p = self.o.lines[lid]
+        bold_run = next(r for r in p.iterfind(RUN) if "".join(r.itertext()) == word)
+        self._apply({"slots": {lid: text + " (수정함)"}})
+        self.assertEqual("".join(bold_run.itertext()), word)
+        self.assertEqual(para_text(p), text + " (수정함)")
+        self.assertEqual(len([r for r in p.iterfind(RUN) if "".join(r.itertext())]), 3)
+
+    def test_part_style_across_runs(self):
+        lid = self.body[0]
+        words = para_text(self.o.lines[lid]).strip().split()
+        self._apply({"styles": [{"target": lid, "part": words[1], "bold": True}]})
+        r = self._apply({"styles": [{"target": lid, "part": f"{words[1]} {words[2]}", "color": "#FF0000"}]})
+        self.assertEqual(r.styled, 1)
+        doc, o = self._again()
+        line = next(ln for ln in o.text.split("\n") if f"[{lid}]" in ln)
+        self.assertIn("글자색 #FF0000", line)
+        self.assertNotIn("〔글자색", line)   # 줄 전체가 아니라 일부만
+
+    def test_table_rows_and_columns(self):
+        bid, tbl = next((k, t) for k, t in self.o.boxes.items() if (t.get("rowCnt"), t.get("colCnt")) == ("4", "4"))
+        total = int(tbl.find(SZ).get("width"))
+        r = self._apply({"merges": [{"table": bid, "from": [2, 1], "to": [3, 1]}],
+                         "table_edits": [{"table": bid, "add_col_after": 4, "cells": ["새 열", "가", "나", "다"]},
+                                         {"table": bid, "add_row_after": 2, "cells": ["a", "b", "c", "d"]},
+                                         {"table": bid, "delete_col": 2}, {"table": bid, "delete_row": 9}]})
+        self.assertEqual((r.table_edits, r.merged), (3, 1))
+        self.assertIn("표의 행·열 넣기·지우기 1건", r.missed)
+        doc, o = self._again()
+        tbl = o.boxes[bid]
+        self.assertEqual((tbl.get("rowCnt"), tbl.get("colCnt")), ("5", "4"))
+        seen = {}
+        for tr in tbl.findall(TR):
+            for tc in tr.iterfind(TC):
+                a, sp = tc.find(hp("cellAddr")), tc.find(hp("cellSpan"))
+                for i in range(int(sp.get("rowSpan"))):
+                    for j in range(int(sp.get("colSpan"))):
+                        key = (int(a.get("rowAddr")) + i, int(a.get("colAddr")) + j)
+                        self.assertNotIn(key, seen)   # 칸이 겹치지 않고
+                        seen[key] = tc
+        self.assertEqual(len(seen), 20)               # 빈 자리도 없다
+        self.assertEqual(seen[(1, 0)].find(hp("cellSpan")).get("rowSpan"), "2")   # 행·열을 바꾼 뒤에 합친다
+        self.assertEqual(sum(int(tc.find(CELLSZ).get("width")) for tc in tbl.find(TR).iterfind(TC)), total)
+
+    def test_row_and_column_through_merged_cell(self):
+        """합친 칸을 가로지르는 자리에 행·열을 넣으면 그 칸이 늘어나고, 지우면 줄어든다."""
+        bid, tbl = next((k, t) for k, t in self.o.boxes.items() if (t.get("rowCnt"), t.get("colCnt")) == ("4", "4"))
+        self._apply({"merges": [{"table": bid, "from": [2, 1], "to": [3, 2]}]})
+        big = self.o.boxes[bid].findall(TR)[1].find(TC)
+        span = big.find(hp("cellSpan"))
+        r = self._apply({"table_edits": [{"table": bid, "add_row_after": 2, "cells": ["c", "d"]},
+                                         {"table": bid, "add_col_after": 1, "cells": ["머리", "끝"]}]})
+        self.assertEqual((r.table_edits, r.missed), (2, []))
+        self.assertEqual((span.get("rowSpan"), span.get("colSpan")), ("3", "3"))
+        self.assertEqual([len(tr.findall(TC)) for tr in tbl.findall(TR)], [5, 3, 2, 2, 5])
+        r = self._apply({"table_edits": [{"table": bid, "delete_row": 2}, {"table": bid, "delete_col": 2}]})
+        self.assertEqual(r.table_edits, 2)
+        self.assertEqual((span.get("rowSpan"), span.get("colSpan")), ("2", "2"))
+        self.assertIs(big.getparent(), tbl.findall(TR)[1])   # 시작 행이 지워지면 합친 칸은 다음 행으로 옮겨진다
+        self.assertEqual((tbl.get("rowCnt"), tbl.get("colCnt")), ("4", "4"))
+        HwpxDocument(data=self.doc.to_bytes())
+
+    def test_border_and_valign(self):
+        tid = next(iter(self.o.tables))
+        r = self._apply({"styles": [{"target": tid, "border_type": "double", "border_sides": ["bottom"],
+                                     "border_color": "#0000FF", "valign": "top"}]})
+        self.assertEqual(r.styled, 1)
+        tc = self.o.tables[tid].trs[0].find(TC)
+        bf = _item(self.doc, "borderFills", "borderFill", tc.get("borderFillIDRef"))
+        self.assertEqual((bf.find(hh("bottomBorder")).get("type"), bf.find(hh("bottomBorder")).get("color")),
+                         ("DOUBLE_SLIM", "#0000FF"))
+        self.assertNotEqual(bf.find(hh("topBorder")).get("color"), "#0000FF")
+        self.assertEqual(tc.find(SUBLIST).get("vertAlign"), "TOP")
+
+    def test_notes_links_and_equations(self):
+        a, b = self.body[0], self.body[1]
+        word = para_text(self.o.lines[b]).strip().split()[1]
+        r = self._apply({"footnotes": [{"target": a, "text": "각주 글"}, {"target": b, "text": "미주 글", "type": "endnote"}],
+                         "links": [{"target": b, "part": word, "url": "https://www.moe.go.kr"},
+                                   {"target": b, "part": word, "url": "javascript:x"}],
+                         "inserts": [{"after": a, "equation": "a over b"}]})
+        self.assertEqual((r.footnotes, r.links, r.inserted), (2, 1, 1))
+        doc, o = self._again()
+        for mark in ("(각주)  각주 글", "(미주)  미주 글", "(위 줄에 하이퍼링크: https://www.moe.go.kr)", "[Q1] (수식) a over b"):
+            self.assertIn(mark, o.text)
+        note = next(k for k, p in o.lines.items() if "각주 글" in para_text(p))
+        r = self._apply({"slots": {"Q1": "x^2"}, "deletes": [note], "inserts": [{"after": "Q1", "lines": ["수식 아래"]}]},
+                        doc, o)
+        self.assertEqual((r.lines, r.deleted, r.inserted, r.missed), (1, 1, 1, []))
+        sec = doc.ordered_sections()[0]
+        self.assertEqual(len(list(sec.iter(hp("footNote")))), 0)   # 글을 지우면 각주째 없어진다
+        self.assertEqual(next(sec.iter(hp("script"))).text, "x^2")
+
+    def test_same_text_is_not_a_change(self):
+        """받는 중인 글자를 화면에 보여 준 뒤 같은 글로 끝나면 바뀐 것이 없다 (줄 배치 정보는 비교하지 않음)."""
+        lid = self.body[0]
+        before, text = self.doc.snapshot(), para_text(self.o.lines[lid])
+        self.ed.type_line(lid, text[:4])
+        self.ed.fill_line(lid, text)
+        self.assertEqual(self.doc.snapshot(), before)
+
+
 class ChatLinkTest(unittest.TestCase):
     def test_split_urls(self):
         self.assertEqual(split_urls("내용은 https://www.moe.go.kr/view.do?m=1을 참고, https://b.kr/y."),

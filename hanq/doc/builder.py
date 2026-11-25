@@ -135,7 +135,31 @@ class DocumentBuilder:
             return self.table(b.get("columns") or [], b.get("rows") or [])
         if kind == "blank":
             return self.blank()
+        if kind in ("equation", "textbox", "chart"):
+            return self._object(kind, b)
         return None
+
+    def _object(self, kind: str, b: dict):
+        """수식·글상자·차트(그림) 한 줄. 내용이 모자라면 None."""
+        from . import objects as ob
+        width = self.doc.text_width()
+        run = self.p_item.find(RUN) if self.p_item is not None else None
+        char_id = run.get("charPrIDRef", "0") if run is not None else "0"
+        if kind == "equation":
+            script = str(b.get("text") or b.get("equation") or "").strip()
+            return self._append(ob.equation_paragraph(script, char_id=char_id)) if script else None
+        if kind == "textbox":
+            lines = b.get("lines") if isinstance(b.get("lines"), list) else str(b.get("text", "")).splitlines()
+            lines = [str(x) for x in lines if str(x).strip()]
+            return self._append(ob.textbox_paragraph(lines, width, char_id=char_id)) if lines else None
+        from .chart import parse_chart, render_chart
+        # 블록의 "type"은 'chart'이므로, 차트 종류(bar·line·pie)는 "chart" 값에서 읽는다
+        chart = parse_chart(b["chart"] if isinstance(b.get("chart"), dict) else {**b, "type": b.get("chart", "bar")})
+        if chart is None:
+            return None
+        w = int(width * 0.6)
+        return self._append(ob.picture_paragraph(self.doc.add_image(render_chart(chart), "png"), w, int(w * 0.6),
+                                                 name=chart["title"] or "차트"))
 
     def finish(self, spec: dict) -> HwpxDocument:
         self.set_cover(str(spec.get("title", "")), str(spec.get("department", "")), str(spec.get("date", "")))
